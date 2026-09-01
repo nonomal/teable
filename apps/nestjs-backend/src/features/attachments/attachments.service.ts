@@ -1,12 +1,12 @@
 /* eslint-disable sonarjs/no-duplicate-string */
 /* eslint-disable @typescript-eslint/naming-convention */
-import fs from 'fs';
 import type { IncomingHttpHeaders } from 'http';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { Readable } from 'stream';
-import { BadRequestException, HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
-import type { IAttachmentItem } from '@teable/core';
+import { pipeline } from 'stream/promises';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { HttpErrorCode, type IAttachmentItem } from '@teable/core';
 import { generateAttachmentId } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import {
@@ -17,19 +17,34 @@ import {
   type SignatureVo,
 } from '@teable/openapi';
 import type { Request, Response } from 'express';
+import fse from 'fs-extra';
 import mimeTypes from 'mime-types';
 import { nanoid } from 'nanoid';
 import { ClsService } from 'nestjs-cls';
 import { CacheService } from '../../cache/cache.service';
 import { StorageConfig, IStorageConfig } from '../../configs/storage';
 import { ThresholdConfig, IThresholdConfig } from '../../configs/threshold.config';
+import { CustomHttpException } from '../../custom.exception';
 import type { IClsStore } from '../../types/cls';
-import { FileUtils } from '../../utils';
+import { FileUtils, getSafeAxiosAgents } from '../../utils';
 import { second } from '../../utils/second';
+import { AttachmentsCropQueueProcessor } from './attachments-crop.processor';
 import { AttachmentsStorageService } from './attachments-storage.service';
 import StorageAdapter from './plugins/adapter';
 import type { LocalStorage } from './plugins/local';
+import { extractLocalFilePath, validateReadPath } from './plugins/local.helper';
 import { InjectStorageAdapter } from './plugins/storage';
+import type { IPresignParams, IPresignRes } from './plugins/types';
+import { getSafeUploadContentType } from './plugins/utils';
+import { getExtensionPreview } from './utils';
+
+const BACKEND_ONLY_UPLOAD_TYPES: ReadonlySet<UploadType> = new Set([
+  UploadType.RecordHistory,
+  UploadType.RecordRemoval,
+  UploadType.WorkflowRunCold,
+  UploadType.AuditLogCold,
+  UploadType.Artifact,
+]);
 
 @Injectable()
 export class AttachmentsService {
@@ -40,6 +55,7 @@ export class AttachmentsService {
     private readonly cls: ClsService<IClsStore>,
     private readonly cacheService: CacheService,
     private readonly attachmentsStorageService: AttachmentsStorageService,
+    private readonly attachmentsCropQueueProcessor: AttachmentsCropQueueProcessor,
     @StorageConfig() readonly storageConfig: IStorageConfig,
     @ThresholdConfig() readonly thresholdConfig: IThresholdConfig,
     @InjectStorageAdapter() readonly storageAdapter: StorageAdapter
@@ -51,7 +67,11 @@ export class AttachmentsService {
     const tokenCache = await this.cacheService.get(`attachment:signature:${token}`);
     const localStorage = this.storageAdapter as LocalStorage;
     if (!tokenCache) {
-      throw new BadRequestException(`Invalid token: ${token}`);
+      throw new CustomHttpException('Invalid token', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.invalidToken',
+        },
+      });
     }
     const { path, bucket } = tokenCache;
     const file = await localStorage.saveTemporaryFile(req);
@@ -68,11 +88,8 @@ export class AttachmentsService {
 
   async readLocalFile(path: string, token?: string) {
     const localStorage = this.storageAdapter as LocalStorage;
+    validateReadPath(path, localStorage.storageDir);
     let respHeaders: Record<string, string> = {};
-
-    if (!path) {
-      throw new HttpException(`Could not find attachment: ${token}`, HttpStatus.NOT_FOUND);
-    }
     const { bucket, token: tokenInPath } = localStorage.parsePath(path);
     if (token && !StorageAdapter.isPublicBucket(bucket)) {
       respHeaders = localStorage.verifyReadToken(token).respHeaders ?? {};
@@ -81,9 +98,13 @@ export class AttachmentsService {
         .txClient()
         .attachments.findUnique({ where: { token: tokenInPath, deletedTime: null } });
       if (!attachment) {
-        throw new BadRequestException(`Invalid path: ${path}`);
+        throw new CustomHttpException('Invalid path', HttpErrorCode.VALIDATION_ERROR, {
+          localization: {
+            i18nKey: 'httpErrors.attachment.invalidPath',
+          },
+        });
       }
-      respHeaders['Content-Type'] = attachment.mimetype;
+      respHeaders['Content-Type'] = getExtensionPreview(attachment.mimetype);
     }
 
     const headers: Record<string, string> = respHeaders ?? {};
@@ -93,11 +114,16 @@ export class AttachmentsService {
   }
 
   localFileConditionalCaching(path: string, reqHeaders: IncomingHttpHeaders, res: Response) {
-    const ifModifiedSince = reqHeaders['if-modified-since'];
     const localStorage = this.storageAdapter as LocalStorage;
+    validateReadPath(path, localStorage.storageDir);
+    const ifModifiedSince = reqHeaders['if-modified-since'];
     const lastModifiedTimestamp = localStorage.getLastModifiedTime(path);
     if (!lastModifiedTimestamp) {
-      throw new BadRequestException(`Could not find attachment: ${path}`);
+      throw new CustomHttpException('Could not find attachment', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.invalidPath',
+        },
+      });
     }
     // Comparison of accuracy in seconds
     if (
@@ -113,32 +139,60 @@ export class AttachmentsService {
 
   async signature(signatureRo: SignatureRo & { internal?: boolean }): Promise<SignatureVo> {
     const { type, ...presignedParams } = signatureRo;
+    // cold archive parts are written exclusively by the backend flushers
+    // (never presigned); a client-signed upload under these prefixes could
+    // forge or corrupt cold parts and _stats.json
+    if (BACKEND_ONLY_UPLOAD_TYPES.has(type)) {
+      throw new BadRequestException('this upload type cannot be signed');
+    }
     const contentLength = signatureRo.contentLength;
     const MAX_FILE_SIZE = this.thresholdConfig.maxAttachmentUploadSize;
     if (contentLength > MAX_FILE_SIZE) {
-      throw new BadRequestException(
-        `File size exceeds the maximum limit of ${(MAX_FILE_SIZE / (1024 * 1024)).toFixed(2)} MB`
-      );
+      this.throwFileSizeExceeded(MAX_FILE_SIZE);
     }
-    const hash = presignedParams.hash;
     const dir = StorageAdapter.getDir(type);
     const bucket = StorageAdapter.getBucket(type);
     const res = await this.storageAdapter.presigned(bucket, dir, {
       ...presignedParams,
+      cacheControl: StorageAdapter.getCacheControl(type),
     });
     const { path, token } = res;
     await this.cacheService.set(
       `attachment:signature:${token}`,
-      { path, bucket, hash },
+      { path, bucket },
       signatureRo.expiresIn ?? second(this.storageConfig.tokenExpireIn)
     );
     return res;
   }
 
+  async presignedInternal(
+    bucket: string,
+    path: string,
+    filename: string,
+    params: Omit<IPresignParams, 'internal' | 'hash'>
+  ): Promise<IPresignRes> {
+    const resPresigned = await this.storageAdapter.presigned(bucket, path, {
+      ...params,
+      hash: filename,
+    });
+    if (this.storageConfig.provider === 'local') {
+      await this.cacheService.set(
+        `attachment:signature:${resPresigned.token}`,
+        { path: resPresigned.path, bucket, hash: filename },
+        params.expiresIn ?? second(this.storageConfig.tokenExpireIn)
+      );
+    }
+    return resPresigned;
+  }
+
   async notify(token: string, filename?: string): Promise<INotifyVo> {
     const tokenCache = await this.cacheService.get(`attachment:signature:${token}`);
     if (!tokenCache) {
-      throw new BadRequestException(`Invalid token: ${token}`);
+      throw new CustomHttpException('Invalid token', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.invalidToken',
+        },
+      });
     }
     const userId = this.cls.get('user.id');
     const { path, bucket } = tokenCache;
@@ -167,6 +221,13 @@ export class AttachmentsService {
         path: true,
       },
     });
+    await this.attachmentsCropQueueProcessor.queue.add('attachment_crop_image', {
+      token: attachment.token,
+      path: attachment.path,
+      mimetype: attachment.mimetype,
+      height: attachment.height,
+      bucket,
+    });
     const filenameHeader = filename
       ? {
           // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -175,6 +236,7 @@ export class AttachmentsService {
       : {};
     return {
       ...attachment,
+      size: Number(attachment.size),
       width: attachment.width ?? undefined,
       height: attachment.height ?? undefined,
       url,
@@ -201,8 +263,18 @@ export class AttachmentsService {
   async uploadFile(file: Express.Multer.File): Promise<IAttachmentItem> {
     const MAX_FILE_SIZE = this.thresholdConfig.maxOpenapiAttachmentUploadSize;
     if (file.size > MAX_FILE_SIZE) {
-      throw new BadRequestException(
-        `File size exceeds the maximum limit of ${(MAX_FILE_SIZE / (1024 * 1024)).toFixed(2)} MB`
+      const maxSize = (MAX_FILE_SIZE / (1024 * 1024)).toFixed(2);
+      throw new CustomHttpException(
+        `File size exceeds the maximum limit of ${maxSize} MB`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.attachment.fileSizeExceedsMaximumLimit',
+            context: {
+              maxSize: `${maxSize}MB`,
+            },
+          },
+        }
       );
     }
 
@@ -219,17 +291,46 @@ export class AttachmentsService {
       internal: true,
     });
     const fileStream = Readable.from(file.buffer);
-
+    const filename = Buffer.from(file.originalname, 'latin1').toString('utf-8');
     this.logger.log(
-      `Uploading file: ${file.originalname}, size: ${contentLength} bytes, mimetype: ${contentType}`
+      `Uploading file: ${filename}, size: ${contentLength} bytes, mimetype: ${contentType}`
     );
 
     await this.uploadStreamToStorage(url, fileStream, contentType, contentLength);
 
-    return await this.notifyToAttachmentItem(token, file.originalname);
+    return await this.notifyToAttachmentItem(token, filename);
   }
 
-  async uploadFromUrl(fileUrl: string): Promise<IAttachmentItem> {
+  /**
+   * Streams an already-open file stream of a known size straight into
+   * storage — no temp file, works the same for local, S3 and MinIO backends.
+   */
+  async uploadFromStream(
+    stream: Readable,
+    params: { filename: string; contentType: string; contentLength: number },
+    uploadType: UploadType = UploadType.Table,
+    options?: { signal?: AbortSignal }
+  ): Promise<IAttachmentItem> {
+    const MAX_FILE_SIZE = this.thresholdConfig.maxOpenapiAttachmentUploadSize;
+    const { filename, contentType, contentLength } = params;
+    if (contentLength > MAX_FILE_SIZE) {
+      this.throwFileSizeExceeded(MAX_FILE_SIZE);
+    }
+
+    const { token, url } = await this.signature({
+      type: uploadType,
+      contentLength,
+      contentType,
+      internal: true,
+    });
+    await this.uploadStreamToStorage(url, stream, contentType, contentLength, options?.signal);
+    return await this.notifyToAttachmentItem(token, filename);
+  }
+
+  async uploadFromUrl(
+    fileUrl: string,
+    uploadType: UploadType = UploadType.Table
+  ): Promise<IAttachmentItem> {
     const MAX_FILE_SIZE = this.thresholdConfig.maxOpenapiAttachmentUploadSize;
 
     const { contentLength, contentType, tempFilePath } = await this.getFileInfo(
@@ -238,14 +339,12 @@ export class AttachmentsService {
     );
 
     if (contentLength > MAX_FILE_SIZE) {
-      throw new BadRequestException(
-        `File size exceeds the maximum limit of ${(MAX_FILE_SIZE / (1024 * 1024)).toFixed(2)} MB`
-      );
+      this.throwFileSizeExceeded(MAX_FILE_SIZE);
     }
 
     const filename = this.getFilenameFromUrl(fileUrl);
     const { token, url } = await this.signature({
-      type: UploadType.Table,
+      type: uploadType,
       contentLength,
       contentType,
       internal: true,
@@ -256,45 +355,108 @@ export class AttachmentsService {
       return await this.notifyToAttachmentItem(token, filename);
     } catch (error) {
       console.error('uploadFromUrl:upload', error);
-      throw new BadRequestException('Url reject');
+      throw new CustomHttpException('Url reject', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.urlReject',
+        },
+      });
     } finally {
       if (tempFilePath) {
-        fs.unlinkSync(tempFilePath);
+        await fse.remove(tempFilePath);
       }
     }
+  }
+
+  private throwFileSizeExceeded(maxFileSize: number): never {
+    const maxSize = (maxFileSize / (1024 * 1024)).toFixed(2);
+    throw new CustomHttpException(
+      `File size exceeds the maximum limit of ${maxSize} MB`,
+      HttpErrorCode.VALIDATION_ERROR,
+      {
+        localization: {
+          i18nKey: 'httpErrors.attachment.fileSizeExceedsMaximumLimit',
+          context: { maxSize: `${maxSize}MB` },
+        },
+      }
+    );
+  }
+
+  private extractLocalFilePath(fileUrl: string): string | null {
+    const localStorage = this.storageAdapter as LocalStorage;
+    return extractLocalFilePath(fileUrl, this.storageConfig.provider, localStorage.storageDir);
+  }
+
+  /**
+   * Read a local file into a temp path, validating size up-front via stat.
+   */
+  private async getLocalFileInfo(
+    relativePath: string,
+    maxFileSize: number
+  ): Promise<{ contentLength: number; contentType: string; tempFilePath: string }> {
+    const localStorage = this.storageAdapter as LocalStorage;
+    const resolvedPath = resolve(localStorage.storageDir, relativePath);
+
+    // Fast size check before streaming — avoids unnecessary I/O for oversized files
+    const stat = await fse.stat(resolvedPath);
+    if (stat.size > maxFileSize) {
+      this.throwFileSizeExceeded(maxFileSize);
+    }
+
+    const tempFilePath = join(tmpdir(), `temp-${nanoid()}`);
+    await pipeline(localStorage.read(relativePath), fse.createWriteStream(tempFilePath));
+
+    return {
+      contentLength: stat.size,
+      contentType: mimeTypes.lookup(relativePath) || 'application/octet-stream',
+      tempFilePath,
+    };
   }
 
   private async getFileInfo(
     fileUrl: string,
     maxFileSize: number
   ): Promise<{ contentLength: number; contentType: string; tempFilePath: string | null }> {
+    // Local provider: read directly from filesystem, bypass HTTP entirely
+    const localRelativePath = this.extractLocalFilePath(fileUrl);
+    if (localRelativePath) {
+      return this.getLocalFileInfo(localRelativePath, maxFileSize);
+    }
+
     let contentLength: number | undefined;
     let contentType: string | undefined;
     let tempFilePath: string | null = null;
 
     try {
-      const headResponse = await axios.head(fileUrl);
+      const headResponse = await axios.head(fileUrl, getSafeAxiosAgents());
       contentLength =
         headResponse.headers['content-length'] && parseInt(headResponse.headers['content-length']);
-      contentType = headResponse.headers['content-type'];
+      contentType =
+        mimeTypes.lookup(fileUrl) ||
+        headResponse.headers['content-type'] ||
+        'application/octet-stream';
       this.logger.log(
         `HEAD request successful. Content-Length: ${contentLength}, Content-Type: ${contentType}`
       );
     } catch (error) {
-      console.warn('HEAD request failed, falling back to GET:', error);
+      this.logger.warn('HEAD request failed, falling back to GET:', error);
     }
 
     if (!contentLength) {
       this.logger.log('Content length not available from HEAD request. Downloading file...');
-      const tempFileName = `temp-${nanoid()}`;
-      tempFilePath = join(tmpdir(), tempFileName);
+      tempFilePath = join(tmpdir(), `temp-${nanoid()}`);
 
-      await this.downloadFile(fileUrl, tempFilePath, maxFileSize);
-      contentLength = fs.statSync(tempFilePath).size;
+      const { contentType: contentTypeFromDownLoad } = await this.downloadFile(
+        fileUrl,
+        tempFilePath,
+        maxFileSize
+      );
+      const stat = await fse.stat(tempFilePath);
+      contentLength = stat.size;
       this.logger.log(`File downloaded. Size: ${contentLength} bytes`);
 
       if (!contentType) {
-        contentType = mimeTypes.lookup(fileUrl) || 'application/octet-stream';
+        contentType =
+          mimeTypes.lookup(fileUrl) || contentTypeFromDownLoad || 'application/octet-stream';
       }
     }
 
@@ -315,67 +477,111 @@ export class AttachmentsService {
     if (tempFilePath) {
       await this.uploadStreamToStorage(
         url,
-        fs.createReadStream(tempFilePath),
+        fse.createReadStream(tempFilePath),
         contentType,
         contentLength
       );
       this.logger.log('Upload from temporary file completed');
     } else {
       this.logger.log(`Downloading and uploading from URL: ${fileUrl}`);
-      const response = await axios.get(fileUrl, { responseType: 'stream' });
+      const response = await axios.get(fileUrl, {
+        responseType: 'stream',
+        ...getSafeAxiosAgents(),
+      });
       await this.uploadStreamToStorage(url, response.data, contentType, contentLength);
     }
   }
 
+  // Sends only Content-Type/Length rather than echoing presigned
+  // requestHeaders: fine for the private-bucket types every caller uses
+  // today, but a public-bucket type would silently lose its Cache-Control
+  // metadata here.
   private async uploadStreamToStorage(
     url: string,
     stream: Readable,
     contentType: string,
-    contentLength: number
+    contentLength: number,
+    signal?: AbortSignal
   ): Promise<void> {
-    await axios.put(url, stream, {
-      headers: {
-        'Content-Type': contentType,
-        'Content-Length': contentLength,
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
-    });
+    try {
+      await axios.put(url, stream, {
+        headers: {
+          'Content-Type': getSafeUploadContentType(contentType),
+          'Content-Length': contentLength,
+        },
+        signal,
+      });
+    } catch (error) {
+      stream.destroy();
+      throw error;
+    }
   }
 
   private getFilenameFromUrl(url: string): string {
     const urlParts = new URL(url);
     const pathParts = urlParts.pathname.split('/');
-    return pathParts[pathParts.length - 1] || 'downloaded_file';
+    const rawFilename = pathParts[pathParts.length - 1] || 'downloaded_file';
+    try {
+      return decodeURIComponent(rawFilename);
+    } catch {
+      return rawFilename;
+    }
   }
 
-  private async downloadFile(url: string, filePath: string, maxSize: number): Promise<void> {
-    const writer = fs.createWriteStream(filePath);
+  private async downloadFile(
+    url: string,
+    filePath: string,
+    maxSize: number
+  ): Promise<{
+    contentType: string;
+  }> {
     let downloadedBytes = 0;
 
     const response = await axios({
       method: 'get',
       url: url,
       responseType: 'stream',
+      ...getSafeAxiosAgents(),
     });
 
     return new Promise((resolve, reject) => {
-      response.data.on('data', (chunk: Buffer) => {
-        downloadedBytes += chunk.length;
-        if (downloadedBytes > maxSize) {
-          writer.close();
-          reject(
-            new BadRequestException(
-              `File size exceeds the maximum limit of ${maxSize / (1024 * 1024)} MB`
-            )
-          );
-        }
-      });
+      const writer = fse.createWriteStream(filePath);
+      const cleanup = () => {
+        writer.removeAllListeners();
+        writer.destroy();
+        response.data?.removeAllListeners();
+        response.data?.destroy?.();
+        fse.removeSync(filePath);
+      };
+      try {
+        response.data.on('data', (chunk: Buffer) => {
+          downloadedBytes += chunk.length;
+          if (downloadedBytes > maxSize) {
+            cleanup();
+            this.throwFileSizeExceeded(maxSize);
+          }
+        });
 
-      response.data.pipe(writer);
+        response.data.on('error', (error: unknown) => {
+          cleanup();
+          reject(error);
+        });
 
-      writer.on('finish', resolve);
-      writer.on('error', reject);
+        response.data.pipe(writer);
+
+        writer.on('finish', () => {
+          resolve({
+            contentType: response?.headers?.['content-type'],
+          });
+        });
+        writer.on('error', (error: unknown) => {
+          cleanup();
+          reject(error);
+        });
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
     });
   }
 }

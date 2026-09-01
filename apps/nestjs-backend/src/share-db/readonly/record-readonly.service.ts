@@ -1,36 +1,56 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '@teable/db-main-prisma';
 import type { IGetRecordsRo } from '@teable/openapi';
+import { IS_TEMPLATE_HEADER, BASE_SHARE_ID_HEADER } from '@teable/openapi';
+import { Knex } from 'knex';
+import { InjectModel } from 'nest-knexjs';
 import { ClsService } from 'nestjs-cls';
-import type { IClsStore } from '../../types/cls';
-import type { IReadonlyAdapterService } from '../interface';
+import { DatabaseRouter } from '../../global/database-router.service';
+import { DATA_KNEX } from '../../global/knex/knex.module';
+import type { IShareDbReadonlyAdapterService, RawOpType } from '../interface';
 import { ReadonlyService } from './readonly.service';
+import type { IReadonlyServiceContext } from './types';
 
 @Injectable()
 export class RecordReadonlyServiceAdapter
   extends ReadonlyService
-  implements IReadonlyAdapterService
+  implements IShareDbReadonlyAdapterService
 {
-  constructor(private readonly cls: ClsService<IClsStore>) {
+  constructor(
+    private readonly cls: ClsService<IReadonlyServiceContext>,
+    private readonly prismaService: PrismaService,
+    private readonly databaseRouter: DatabaseRouter,
+    @InjectModel(DATA_KNEX) private readonly knex: Knex
+  ) {
     super(cls);
   }
 
   getDocIdsByQuery(tableId: string, query: IGetRecordsRo = {}) {
     const shareId = this.cls.get('shareViewId');
-    const url = shareId
+    const baseShareId = this.cls.get('baseShareId');
+    const useShareViewEndpoint = shareId && !baseShareId;
+    const templateHeader = this.cls.get('templateHeader');
+    const url = useShareViewEndpoint
       ? `/share/${shareId}/socket/record/doc-ids`
       : `/table/${tableId}/record/socket/doc-ids`;
     return this.axios
-      .get(url, {
-        headers: {
-          cookie: this.cls.get('cookie'),
-        },
-        params: {
+      .post(
+        url,
+        {
           ...query,
           filter: JSON.stringify(query?.filter),
           orderBy: JSON.stringify(query?.orderBy),
           groupBy: JSON.stringify(query?.groupBy),
+          collapsedGroupIds: JSON.stringify(query?.collapsedGroupIds),
         },
-      })
+        {
+          headers: {
+            cookie: this.cls.get('cookie'),
+            [IS_TEMPLATE_HEADER]: templateHeader,
+            [BASE_SHARE_ID_HEADER]: baseShareId,
+          },
+        }
+      )
       .then((res) => res.data);
   }
   getSnapshotBulk(
@@ -39,19 +59,73 @@ export class RecordReadonlyServiceAdapter
     projection?: { [fieldNameOrId: string]: boolean }
   ) {
     const shareId = this.cls.get('shareViewId');
-    const url = shareId
+    const baseShareId = this.cls.get('baseShareId');
+    const useShareViewEndpoint = shareId && !baseShareId;
+    const templateHeader = this.cls.get('templateHeader');
+    const url = useShareViewEndpoint
       ? `/share/${shareId}/socket/record/snapshot-bulk`
       : `/table/${tableId}/record/socket/snapshot-bulk`;
+    // Use POST body: hundreds of record ids plus a wide projection in GET
+    // query params can exceed the HTTP header size limit (431)
     return this.axios
-      .get(url, {
-        headers: {
-          cookie: this.cls.get('cookie'),
-        },
-        params: {
+      .post(
+        url,
+        {
           ids: recordIds,
           projection,
         },
-      })
+        {
+          headers: {
+            cookie: this.cls.get('cookie'),
+            [IS_TEMPLATE_HEADER]: templateHeader,
+            [BASE_SHARE_ID_HEADER]: baseShareId,
+          },
+        }
+      )
       .then((res) => res.data);
+  }
+
+  private async validateTable(tableId: string) {
+    const table = await this.prismaService.tableMeta.findUnique({
+      where: {
+        id: tableId,
+      },
+      select: {
+        version: true,
+        deletedTime: true,
+        dbTableName: true,
+      },
+    });
+    if (!table) {
+      throw new NotFoundException('Table not found');
+    }
+    return table;
+  }
+
+  async getVersionAndType(tableId: string, recordId: string) {
+    const table = await this.validateTable(tableId);
+    return this.databaseRouter
+      .queryDataPrismaForTable<
+        { version: number; deletedTime: Date | null }[]
+      >(tableId, this.knex(table.dbTableName).select('__version as version').where('__id', recordId).toQuery())
+      .then((res) => this.formatVersionAndType(res[0]));
+  }
+
+  async getVersionAndTypeMap(tableId: string, recordIds: string[]) {
+    const table = await this.validateTable(tableId);
+    const nativeQuery = this.knex(table.dbTableName)
+      .select('__version as version', '__id')
+      .whereIn('__id', recordIds)
+      .toQuery();
+    const recordRaw = await this.databaseRouter.queryDataPrismaForTable<
+      { version: number; deletedTime: Date | null; __id: string }[]
+    >(tableId, nativeQuery);
+    return recordRaw.reduce(
+      (acc, record) => {
+        acc[record.__id] = this.formatVersionAndType(record);
+        return acc;
+      },
+      {} as Record<string, { version: number; type: RawOpType }>
+    );
   }
 }

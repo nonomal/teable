@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Store } from 'express-session';
 import { pick } from 'lodash';
 import { CacheService } from '../../../cache/cache.service';
@@ -13,6 +13,7 @@ const SESSION_STORE_KEYS = ['passport', 'cookie'] as const;
 export class SessionStoreService extends Store {
   private readonly ttl: number;
   private readonly userSessionExpire: number;
+  private readonly logger = new Logger(SessionStoreService.name);
 
   constructor(
     private readonly cacheService: CacheService,
@@ -43,17 +44,33 @@ export class SessionStoreService extends Store {
   private async getCache(sid: string) {
     const expire = await this.cacheService.get(`auth:session-expire:${sid}`);
     if (expire) {
+      this.logger.log(`Session ${sid} is expired`);
       return null;
     }
     const session = await this.cacheService.get(`auth:session-store:${sid}`);
     if (!session) {
+      this.logger.log(`Session ${sid} not found`);
       return null;
     }
     const userId = session.passport.user.id;
     const userSessions = (await this.cacheService.get(`auth:session-user:${userId}`)) ?? {};
     if (!userSessions[sid]) {
-      await this.cacheService.del(`auth:session-store:${sid}`);
-      return null;
+      // The per-user map is updated with an unlocked read-modify-write, so two
+      // concurrent signins/touches for the same user (multiple devices,
+      // parallel e2e workers) can clobber each other's entry. A missing entry
+      // therefore only means "revoked" when a clearByUserId actually happened
+      // and this session predates it; otherwise repair the map instead of
+      // destroying a session the user still holds.
+      const clearedAtSec = await this.cacheService.get(`auth:session-user-cleared:${userId}`);
+      if (clearedAtSec && this.sessionRenewedAtSec(session) <= clearedAtSec) {
+        this.logger.log(`Session ${sid} not found in userSessions`);
+        await this.cacheService.del(`auth:session-store:${sid}`);
+        return null;
+      }
+      this.logger.log(`Session ${sid} restored into userSessions after a lost map update`);
+      userSessions[sid] = Math.floor(Date.now() / 1000) + this.userSessionExpire;
+      await this.cacheService.set(`auth:session-user:${userId}`, userSessions, this.ttl);
+      return session;
     }
     // The expiration time is greater than the session cache time,
     // so that the user session does not expire while the session is still alive.
@@ -62,6 +79,7 @@ export class SessionStoreService extends Store {
       delete userSessions[sid];
       await this.cacheService.del(`auth:session-store:${sid}`);
       await this.cacheService.set(`auth:session-user:${userId}`, userSessions, this.ttl);
+      this.logger.log(`Session ${sid} expired, remove from userSessions`);
       return null;
     }
     return session;
@@ -116,7 +134,29 @@ export class SessionStoreService extends Store {
     }
   }
 
+  /**
+   * A session's last issue/renewal time: cookie.expires is stamped now+ttl on
+   * save and on every rolling touch. Unknown expiry is treated as renewed
+   * "now" so a fresh post-clear session is never mistaken for a revoked one.
+   */
+  private sessionRenewedAtSec(session: ISessionData): number {
+    const expires = session.cookie?.expires;
+    const expiresMs =
+      expires instanceof Date ? expires.getTime() : expires ? new Date(expires).getTime() : NaN;
+    if (!Number.isFinite(expiresMs)) {
+      return Math.floor(Date.now() / 1000);
+    }
+    return Math.floor(expiresMs / 1000) - this.ttl;
+  }
+
   async clearByUserId(userId: string) {
+    // Mark the clear before deleting anything so the getCache repair path
+    // (lost-map-update recovery) cannot resurrect the sessions being revoked.
+    await this.cacheService.set(
+      `auth:session-user-cleared:${userId}`,
+      Math.floor(Date.now() / 1000),
+      this.userSessionExpire
+    );
     const userSessions = (await this.cacheService.get(`auth:session-user:${userId}`)) ?? {};
     for (const sid of Object.keys(userSessions)) {
       // Preventing competition

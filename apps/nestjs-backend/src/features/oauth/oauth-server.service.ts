@@ -2,54 +2,76 @@ import {
   BadRequestException,
   HttpException,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import { getRandomString, nullsToUndefined } from '@teable/core';
+import { getRandomString, HttpErrorCode, nullsToUndefined } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import type { DecisionInfoGetVo } from '@teable/openapi';
 import type { Response, Request } from 'express';
 import { difference, pick } from 'lodash';
 import ms from 'ms';
+import { ClsService } from 'nestjs-cls';
 import type {
   IssueGrantCodeFunction,
   IssueExchangeCodeFunction,
-  ValidateFunctionArity4,
   ImmediateFunction,
   ExchangeDoneFunction,
   OAuth2,
+  ValidateFunctionArity2,
 } from 'oauth2orize';
 import oauth2orize, { AuthorizationError } from 'oauth2orize';
 import { CacheService } from '../../cache/cache.service';
-import { BaseConfig, IBaseConfig } from '../../configs/base.config';
+import type { IOAuthCodeState } from '../../cache/types';
 import { IOAuthConfig, OAuthConfig } from '../../configs/oauth.config';
+import { CustomHttpException } from '../../custom.exception';
+import { Events } from '../../event-emitter/events';
+import type { IClsStore } from '../../types/cls';
 import { second } from '../../utils/second';
 import { AccessTokenService } from '../access-token/access-token.service';
+import { AuditScope } from '../audit/audit-scope';
+import { Audit } from '../audit/audit.decorator';
+import { TeableJwtService } from '../auth/jwt/teable-jwt.service';
+import { DEVICE_CODE_GRANT_TYPE, OAuthDeviceService } from './oauth-device.service';
 import { OAuthTxStore } from './oauth-tx-store';
-import type { IAuthorizeClient, IExchangeClient, IOAuth2Server } from './types';
+import { PkceService } from './pkce.service';
+import type { IAuthorizeClient, ITokenClient, IOAuth2Server, IAuthorizeRequest } from './types';
 
 @Injectable()
 export class OAuthServerService {
+  private readonly logger = new Logger(OAuthServerService.name);
   server: IOAuth2Server;
 
   constructor(
     private readonly prismaService: PrismaService,
     private readonly cacheService: CacheService,
     private readonly accessTokenService: AccessTokenService,
-    private readonly jwtService: JwtService,
+    private readonly jwtService: TeableJwtService,
     private readonly oauthTxStore: OAuthTxStore,
-    @BaseConfig() private readonly baseConfig: IBaseConfig,
+    private readonly pkceService: PkceService,
+    private readonly deviceService: OAuthDeviceService,
+    // `audit` + `cls` are the @Audit decorator's host contract (it reads
+    // this.audit / this.cls) — required by the decorated touchAuthorize.
+    private readonly audit: AuditScope,
+    private readonly cls: ClsService<IClsStore>,
     @OAuthConfig() private readonly oauth2Config: IOAuthConfig
   ) {
     this.server = oauth2orize.createServer({
       store: this.oauthTxStore,
     });
     this.server.grant(oauth2orize.grant.code(this.codeGrant));
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    this.server.grant(require('oauth2orize-pkce').extensions());
     this.server.exchange(oauth2orize.exchange.code(this.codeExchange));
-    (this.server as unknown as IOAuth2Server<IExchangeClient>).exchange(
+    (this.server as unknown as IOAuth2Server<ITokenClient>).exchange(
       oauth2orize.exchange.refreshToken(this.refreshTokenExchange)
     );
+    // Device grant: a plain middleware rather than an oauth2orize exchange
+    // factory, because the client polls the same endpoint many times and most
+    // of those calls answer with an error rather than a token.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (this.server as any).exchange(DEVICE_CODE_GRANT_TYPE, this.deviceCodeExchange);
   }
 
   private async getAuthorizedTime(userId: string, clientId: string) {
@@ -82,12 +104,49 @@ export class OAuthServerService {
     return error;
   }
 
-  private authorizeValidate: ValidateFunctionArity4<IAuthorizeClient> = async (
-    clientId,
-    queryRedirectUri,
-    queryScopes,
-    done
-  ) => {
+  private async checkTokenRateLimit(clientId: string, userId: string) {
+    const { tokenRateLimit, tokenRateWindow } = this.oauth2Config;
+    if (tokenRateLimit <= 0) {
+      return;
+    }
+    const cacheKey = `oauth:token-rate:${clientId}:${userId}` as const;
+    const count = await this.cacheService.incr(cacheKey, second(tokenRateWindow));
+    if (count > tokenRateLimit) {
+      this.logger.warn(
+        `OAuth token rate limit exceeded for client ${clientId} user ${userId}: ${count}/${tokenRateLimit}`
+      );
+      throw new CustomHttpException(
+        `Token request rate limit exceeded, please try again later`,
+        HttpErrorCode.TOO_MANY_REQUESTS
+      );
+    }
+  }
+
+  private validateRedirectUri(
+    redirectUri: string,
+    redirectUris: string[],
+    type: 'pkce' | 'secret'
+  ) {
+    if (
+      type === 'pkce' &&
+      redirectUris.some((uri) => this.pkceService.isLoopbackMatch(uri, redirectUri))
+    ) {
+      return;
+    }
+    if (type === 'secret' && redirectUris.includes(redirectUri)) {
+      return;
+    }
+    throw new UnauthorizedException('Invalid redirectUri');
+  }
+
+  private authorizeValidate: ValidateFunctionArity2<IAuthorizeClient> = async (areq, done) => {
+    const {
+      clientID: clientId,
+      redirectURI,
+      scope: queryScopes,
+      codeChallenge,
+      codeChallengeMethod,
+    } = areq as IAuthorizeRequest;
     try {
       const { redirectUris, scopes } = await this.getOAuthApp(clientId);
       // validate scopes if get scopes from user
@@ -100,12 +159,30 @@ export class OAuthServerService {
       if (!redirectUris.length) {
         return done(new BadRequestException('Redirect uri not configured'));
       }
-      const redirectUri = queryRedirectUri || redirectUris[0];
-      // valid redirectUri
-      if (!redirectUris.includes(redirectUri)) {
-        return done(new BadRequestException('Redirect uri not found'));
-      }
+      const redirectUri = redirectURI || redirectUris[0];
       const clientScopes = queryScopes ?? scopes;
+      if (codeChallenge) {
+        if (codeChallengeMethod !== 'S256') {
+          return done(new BadRequestException('Invalid code challenge method'));
+        }
+        if (!this.pkceService.isValidCodeChallenge(codeChallenge)) {
+          return done(new BadRequestException('Invalid code challenge'));
+        }
+        this.validateRedirectUri(redirectUri, redirectUris, 'pkce');
+        return done(
+          null,
+          {
+            clientId,
+            scopes: clientScopes,
+            redirectUri,
+            codeChallenge,
+            codeChallengeMethod,
+          },
+          redirectUri
+        );
+      }
+      // valid redirectUri
+      this.validateRedirectUri(redirectUri, redirectUris, 'secret');
       done(
         null,
         {
@@ -136,8 +213,19 @@ export class OAuthServerService {
     return done(null, false, undefined, undefined);
   };
 
+  // oauth2orize middlewares complete the response themselves on their success
+  // paths (trusted-client authorize, token issuance, decision redirect) and
+  // never invoke next() there — so a promise resolved only from the next()
+  // callback stays pending forever, retaining the request context. Resolving
+  // on response close (fires after finish and on aborted connections alike)
+  // settles every path; a later resolve after reject is a no-op.
+  private settleOnResponseClose(res: Response, resolve: () => void) {
+    res.once('close', resolve);
+  }
+
   async authorize(req: Request, res: Response) {
     return new Promise<void>((resolve, reject) => {
+      this.settleOnResponseClose(res, resolve);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.server as any).authorization(this.authorizeValidate, this.authorizeImmediate)(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -148,8 +236,9 @@ export class OAuthServerService {
             return reject(this.handleError(error));
           }
           res.redirect(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            `${this.baseConfig.publicOrigin}/oauth/decision?transaction_id=${(req as any).oauth2.transactionID}`
+            `/oauth/decision?transaction_id=${
+              (req as Request & { oauth2: { transactionID: string } }).oauth2.transactionID
+            }`
           );
           resolve();
         }
@@ -159,6 +248,7 @@ export class OAuthServerService {
 
   async token(req: Request, res: Response) {
     return new Promise<void>((resolve, reject) => {
+      this.settleOnResponseClose(res, resolve);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.server.token()(req as any, res, (error) => {
         if (error) {
@@ -176,9 +266,17 @@ export class OAuthServerService {
       .catch(cb);
   };
 
-  private touchAuthorize = async (clientId: string, userId: string) => {
-    // update authorized time
-    console.log('touchAuthorize', clientId, userId);
+  // Was an arrow property; now a method so @Audit can decorate it (decisionComplete
+  // still binds `this` itself). Audit row + emit make the grant visible to the audit
+  // trail and to analytics ("user authorized app X" — integration-adoption signal).
+  @Audit({
+    action: Events.OAUTH_APP_AUTHORIZE,
+    resourceId: (clientId: string) => clientId,
+    userId: (_clientId: string, userId: string) => userId,
+    params: (clientId: string) => ({ clientId }),
+    emit: true,
+  })
+  private async touchAuthorize(clientId: string, userId: string) {
     await this.prismaService.oAuthAppAuthorized.upsert({
       where: {
         // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -196,10 +294,11 @@ export class OAuthServerService {
         authorizedTime: new Date().toISOString(),
       },
     });
-  };
+  }
 
   async decision(req: Request, res: Response) {
     return new Promise<void>((resolve, reject) => {
+      this.settleOnResponseClose(res, resolve);
       // this.decision() return an array of middleware
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fns: Array<ReturnType<IOAuth2Server['decision']>> = (this.server as any).decision(
@@ -244,7 +343,7 @@ export class OAuthServerService {
     });
   }
 
-  private codeGrant: IssueGrantCodeFunction = async (client, _redirectUri, user, ares, done) => {
+  private codeGrant: IssueGrantCodeFunction = async (client, _redirectUri, user, _ares, done) => {
     const { clientId } = await this.getOAuthApp(client.clientId);
     const code = getRandomString(16);
     // save code
@@ -255,6 +354,8 @@ export class OAuthServerService {
         redirectUri: client.redirectUri,
         scopes: client.scopes,
         user: pick(user, ['id', 'email', 'name']),
+        codeChallenge: client.codeChallenge,
+        codeChallengeMethod: client.codeChallengeMethod,
       },
       this.oauth2Config.codeExpireIn
     );
@@ -282,118 +383,271 @@ export class OAuthServerService {
     });
   }
 
-  private getRefreshToken(client: IExchangeClient, accessTokenId: string, sign: string) {
-    const { clientId, clientSecret } = client;
-    return this.jwtService.signAsync(
-      {
-        clientId,
-        secret: clientSecret,
-        accessTokenId,
-        sign: sign,
-      },
-      { expiresIn: this.oauth2Config.refreshTokenExpireIn }
-    );
+  private getRefreshToken(client: ITokenClient, accessTokenId: string, sign: string) {
+    const payload =
+      client.type === 'pkce'
+        ? { clientId: client.clientId, accessTokenId, sign }
+        : { clientId: client.clientId, secret: client.clientSecret, accessTokenId, sign };
+    return this.jwtService.signAsync(payload, {
+      expiresIn: this.oauth2Config.refreshTokenExpireIn,
+    });
   }
 
   private getRefreshTokenExpireTime() {
     return new Date(Date.now() + ms(this.oauth2Config.refreshTokenExpireIn)).toISOString();
   }
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity
+  private verifyExchangeClient(client: ITokenClient, state: IOAuthCodeState) {
+    // code_challenge was set during authorize — code_verifier is required
+    if (client.type === 'pkce') {
+      if (!client.codeVerifier) {
+        throw new BadRequestException('code_verifier is required');
+      }
+      if (!this.pkceService.isValidCodeVerifier(client.codeVerifier)) {
+        throw new BadRequestException('Invalid code_verifier format');
+      }
+      if (!state.codeChallenge) {
+        throw new BadRequestException('code_challenge is required');
+      }
+      if (!state.codeChallengeMethod || state.codeChallengeMethod !== 'S256') {
+        throw new BadRequestException('Invalid code_challenge method');
+      }
+      const valid = this.pkceService.validateCodeVerifier(
+        state.codeChallenge,
+        state.codeChallengeMethod,
+        client.codeVerifier
+      );
+      if (!valid) {
+        throw new UnauthorizedException('Invalid code_verifier');
+      }
+    } else if (client.type === 'secret') {
+      if (!client.clientSecret) {
+        throw new BadRequestException('client_secret is required');
+      }
+      // RFC 7636: once code_challenge is sent, code_verifier must be provided
+      if (state.codeChallenge) {
+        throw new BadRequestException('code_verifier is required for PKCE flow');
+      }
+    } else {
+      throw new BadRequestException('Invalid client type');
+    }
+  }
+
+  /**
+   * Poll leg of the device grant (RFC 8628 §3.4-3.5). Answers with a token pair
+   * once someone approved the user code in a browser, and with the spec's error
+   * codes until then — `authorization_pending` is the normal case, not a fault.
+   */
+  private deviceCodeExchange = async (
+    req: Request,
+    res: Response,
+    next: (err?: unknown) => void
+  ) => {
+    const deviceCode = (req.body as Record<string, string> | undefined)?.device_code;
+    const client = req.user as ITokenClient | undefined;
+
+    const respond = (status: number, payload: Record<string, unknown>) => {
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Pragma', 'no-cache');
+      res.statusCode = status;
+      res.end(JSON.stringify(payload));
+    };
+
+    try {
+      if (!client) {
+        return next(new UnauthorizedException('Invalid client'));
+      }
+      if (!deviceCode) {
+        return respond(400, {
+          error: 'invalid_request',
+          error_description: 'device_code is required',
+        });
+      }
+
+      const result = await this.deviceService.poll(deviceCode, client.clientId);
+      if (result.status !== 'approved') {
+        const errors = {
+          pending: 'authorization_pending',
+          slow_down: 'slow_down',
+          denied: 'access_denied',
+          expired: 'expired_token',
+        } as const;
+        return respond(400, { error: errors[result.status] });
+      }
+
+      const { user, scopes } = result.state;
+      let tokens: { accessToken: string; refreshToken: string };
+      try {
+        await this.checkTokenRateLimit(client.clientId, user.id);
+        tokens = await this.prismaService.$tx(() =>
+          this.issueTokenPair({ client, userId: user.id, scopes })
+        );
+      } catch (error) {
+        // poll() consumed the code as its claim; put the approval back so a
+        // transient failure here (rate limit, DB hiccup) costs the client one
+        // poll, not the person the whole browser round-trip.
+        await this.deviceService.restore(deviceCode, result.state);
+        throw error;
+      }
+      // No touchAuthorize here: decideDevice already recorded the grant when
+      // the person approved, and a second call would double the audit event.
+
+      return respond(200, {
+        access_token: tokens.accessToken,
+        refresh_token: tokens.refreshToken,
+        token_type: 'Bearer',
+        scopes,
+        expires_in: second(this.oauth2Config.accessTokenExpireIn),
+        refresh_expires_in: second(this.oauth2Config.refreshTokenExpireIn),
+      });
+    } catch (error) {
+      return next(error);
+    }
+  };
+
+  /** Access token + refresh token for one (client, user, scopes). */
+  private async issueTokenPair(params: {
+    client: ITokenClient;
+    userId: string;
+    scopes: string[];
+  }): Promise<{ accessToken: string; refreshToken: string }> {
+    const { client, userId, scopes } = params;
+    const accessToken = await this.generateAccessToken({
+      userId,
+      scopes,
+      clientId: client.clientId,
+      clientName: client.name,
+    });
+    const refreshTokenSign = getRandomString(16);
+    const refreshToken = await this.getRefreshToken(client, accessToken.id, refreshTokenSign);
+    await this.prismaService.txClient().oAuthAppToken.create({
+      data: {
+        clientId: client.clientId,
+        refreshTokenSign,
+        appSecretId: (client as { secretId?: string }).secretId,
+        createdBy: userId,
+        expiredTime: this.getRefreshTokenExpireTime(),
+      },
+    });
+    return { accessToken: accessToken.token, refreshToken };
+  }
+
+  /** Approve or deny a device user code on behalf of the signed-in user. */
+  async decideDevice(params: {
+    userCode: string;
+    approve: boolean;
+    user: { id: string; name: string; email: string };
+  }) {
+    const { clientId } = await this.deviceService.decide(params);
+    if (params.approve) {
+      await this.touchAuthorize(clientId, params.user.id);
+    }
+  }
+
   private codeExchange: IssueExchangeCodeFunction = async (client, code, redirectUri, done) => {
-    await this.prismaService
+    const completeExchange = await this.prismaService
       .$tx(async () => {
-        // Verify the code
         const codeState = await this.cacheService.get(`oauth:code:${code}`);
         if (!codeState) {
-          return done(new UnauthorizedException('Invalid code'));
+          return () => done(new UnauthorizedException('Invalid code'));
         }
         await this.cacheService.del(`oauth:code:${code}`);
+        await this.checkTokenRateLimit(client.clientId, codeState.user.id);
 
         if (codeState.clientId !== client.clientId) {
-          return done(new UnauthorizedException('Invalid client'));
+          return () => done(new UnauthorizedException('Invalid client'));
         }
-        if (redirectUri && codeState.redirectUri !== redirectUri) {
-          return done(new UnauthorizedException('Invalid redirectUri'));
+        if (!redirectUri) {
+          return () => done(new UnauthorizedException('redirect_uri is required'));
         }
+        if (redirectUri !== codeState.redirectUri) {
+          return () => done(new UnauthorizedException('Invalid redirectUri'));
+        }
+        const tokenClient = client as ITokenClient;
+        this.verifyExchangeClient(tokenClient, codeState);
 
-        // save access token
-        const accessToken = await this.generateAccessToken({
+        const { accessToken, refreshToken } = await this.issueTokenPair({
+          client: tokenClient,
           userId: codeState.user.id,
           scopes: codeState.scopes,
-          clientId: client.clientId,
-          clientName: client.name,
         });
-
-        // save oauth access token
-        const refreshTokenSign = getRandomString(16);
-        const refreshToken = await this.getRefreshToken(client, accessToken.id, refreshTokenSign);
-        await this.prismaService.txClient().oAuthAppToken.create({
-          data: {
-            refreshTokenSign,
-            appSecretId: client.secretId,
-            createdBy: codeState.user.id,
-            expiredTime: this.getRefreshTokenExpireTime(),
-          },
-        });
-        // Issue a token
-        done(null, accessToken.token, refreshToken, {
-          scopes: codeState.scopes,
-          expires_in: second(this.oauth2Config.accessTokenExpireIn),
-          refresh_expires_in: second(this.oauth2Config.refreshTokenExpireIn),
-        });
+        return () =>
+          done(null, accessToken, refreshToken, {
+            scopes: codeState.scopes,
+            expires_in: second(this.oauth2Config.accessTokenExpireIn),
+            refresh_expires_in: second(this.oauth2Config.refreshTokenExpireIn),
+          });
       })
-      .catch((error) => done(error));
+      .catch((error) => () => done(error));
+
+    return completeExchange();
   };
 
   private refreshTokenExchange: (
-    client: IExchangeClient,
+    client: ITokenClient,
     refreshToken: string,
     issued: ExchangeDoneFunction
-  ) => void = (client, refreshToken: string, done) => {
+  ) => void = (client, refreshToken, done) => {
     return this.prismaService
       .$tx(async () => {
-        const { clientSecret, name, secretId } = client;
-        const { clientId, secret, accessTokenId, sign } = await this.jwtService.verifyAsync<{
+        const decoded = await this.jwtService.verifyAsync<{
           clientId: string;
-          secret: string;
+          secret?: string;
           accessTokenId: string;
           sign: string;
         }>(refreshToken);
 
-        if (client.clientId !== clientId) {
-          return done(new UnauthorizedException('Invalid client'));
+        if (client.clientId !== decoded.clientId) {
+          return () => done(new UnauthorizedException('Invalid client'));
         }
-        if (clientSecret !== secret) {
-          return done(new UnauthorizedException('Invalid secret'));
+        if ((client as ITokenClient & { clientSecret?: string })?.clientSecret !== decoded.secret) {
+          return () => done(new UnauthorizedException('Invalid secret'));
         }
 
         const oldAccessToken = await this.prismaService.txClient().accessToken.findUnique({
-          where: { id: accessTokenId },
+          where: { id: decoded.accessTokenId },
         });
-
         if (!oldAccessToken) {
-          return done(new UnauthorizedException('Invalid access token'));
+          return () => done(new UnauthorizedException('Invalid access token'));
         }
+        await this.checkTokenRateLimit(client.clientId, oldAccessToken.userId);
+
+        const authorized = await this.prismaService.txClient().oAuthAppAuthorized.findUnique({
+          where: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            clientId_userId: {
+              clientId: decoded.clientId,
+              userId: oldAccessToken.userId,
+            },
+          },
+        });
+        if (!authorized) {
+          return () => done(new UnauthorizedException('Invalid authorized'));
+        }
+
         const scopes = oldAccessToken.scopes ? JSON.parse(oldAccessToken.scopes) : [];
         const accessToken = await this.generateAccessToken({
           userId: oldAccessToken.userId,
           scopes,
-          clientId,
-          clientName: name,
+          clientId: decoded.clientId,
+          clientName: client.name,
         });
 
-        // validate refresh_token and refresh refresh_token
         const oauthAppToken = await this.prismaService
           .txClient()
           .oAuthAppToken.update({
-            where: { refreshTokenSign: sign, appSecretId: secretId },
+            where: {
+              clientId: decoded.clientId,
+              refreshTokenSign: decoded.sign,
+              appSecretId: client.secretId,
+            },
             data: {
               refreshTokenSign: getRandomString(16),
               expiredTime: this.getRefreshTokenExpireTime(),
             },
-            select: {
-              refreshTokenSign: true,
-            },
+            select: { refreshTokenSign: true },
           })
           .catch(() => {
             throw new UnauthorizedException('Invalid refresh token');
@@ -404,14 +658,15 @@ export class OAuthServerService {
           accessToken.id,
           oauthAppToken.refreshTokenSign
         );
-        // Issue a token
-        done(null, accessToken.token, newRefreshToken, {
-          scopes,
-          expires_in: second(this.oauth2Config.accessTokenExpireIn),
-          refresh_expires_in: second(this.oauth2Config.refreshTokenExpireIn),
-        });
+        return () =>
+          done(null, accessToken.token, newRefreshToken, {
+            scopes,
+            expires_in: second(this.oauth2Config.accessTokenExpireIn),
+            refresh_expires_in: second(this.oauth2Config.refreshTokenExpireIn),
+          });
       })
-      .catch((error) => done(error));
+      .catch((error) => () => done(error))
+      .then((completeExchange) => completeExchange());
   };
 
   async getDecisionInfo(req: Request, transactionId: string) {

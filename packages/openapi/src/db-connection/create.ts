@@ -17,13 +17,13 @@ export const dbConnectionVoSchema = z.object({
     db: z.string().optional(),
     user: z.string().optional(),
     pass: z.string().optional(),
-    params: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
+    params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
   }),
   connection: z.object({
     max: z.number(),
     current: z.number(),
   }),
-  url: z.string().openapi({ description: 'The URL that can be used to connect to the database' }),
+  url: z.string().meta({ description: 'The URL that can be used to connect to the database' }),
 });
 
 export type IDbConnectionVo = z.infer<typeof dbConnectionVoSchema>;
@@ -33,6 +33,9 @@ export const CreateDbConnectionRoute: RouteConfig = registerRoute({
   path: CREATE_DB_CONNECTION,
   description: 'Create a db connection url',
   request: {
+    params: z.object({
+      baseId: z.string(),
+    }),
     body: {
       content: {
         'application/json': {

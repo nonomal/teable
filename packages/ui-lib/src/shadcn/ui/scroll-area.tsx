@@ -2,22 +2,36 @@
 
 import * as ScrollAreaPrimitive from '@radix-ui/react-scroll-area';
 import * as React from 'react';
+import { useUiDirection } from '../../base/direction/direction';
 
 import { cn } from '../utils';
 
 const ScrollArea = React.forwardRef<
   React.ElementRef<typeof ScrollAreaPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
->(({ className, children, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root> & {
+    scrollBar?: 'horizontal' | 'vertical' | 'both' | 'none';
+    viewportRef?: React.Ref<HTMLDivElement>;
+  }
+>(({ className, children, onScroll, scrollBar = 'vertical', viewportRef, ...props }, ref) => (
   <ScrollAreaPrimitive.Root
+    dir={useUiDirection()}
     ref={ref}
     className={cn('relative overflow-hidden', className)}
     {...props}
   >
-    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
+    <ScrollAreaPrimitive.Viewport
+      ref={viewportRef}
+      className="h-full w-full rounded-[inherit]"
+      onScroll={onScroll}
+    >
       {children}
     </ScrollAreaPrimitive.Viewport>
-    <ScrollBar />
+    {scrollBar && (scrollBar === 'both' || scrollBar === 'vertical') && (
+      <ScrollBar orientation="vertical" />
+    )}
+    {scrollBar && (scrollBar === 'both' || scrollBar === 'horizontal') && (
+      <ScrollBar orientation="horizontal" />
+    )}
     <ScrollAreaPrimitive.Corner />
   </ScrollAreaPrimitive.Root>
 ));
@@ -32,7 +46,7 @@ const ScrollBar = React.forwardRef<
     orientation={orientation}
     className={cn(
       'flex touch-none select-none transition-colors',
-      orientation === 'vertical' && 'h-full w-2.5 border-l border-l-transparent p-[1px]',
+      orientation === 'vertical' && 'h-full w-2.5 border-s border-s-transparent p-[1px]',
       orientation === 'horizontal' && 'h-2.5 flex-col border-t border-t-transparent p-[1px]',
       className
     )}

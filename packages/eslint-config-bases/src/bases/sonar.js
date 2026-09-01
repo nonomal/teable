@@ -5,7 +5,7 @@
 
 const sonarPatterns = {
   files: ['*.{js,jsx,ts,tsx}'],
-  excludedFiles: ['**/?(*.)+(test).{js,jsx,ts,tsx}', '*.stories.{js,ts,jsx,tsx}'],
+  excludedFiles: ['**/?(*.)+(spec|test).{js,jsx,ts,tsx}', '*.stories.{js,ts,jsx,tsx}'],
 };
 
 module.exports = {
@@ -20,16 +20,30 @@ module.exports = {
       excludedFiles: sonarPatterns.excludedFiles,
       extends: ['plugin:sonarjs/recommended'],
       rules: {
+        'sonarjs/no-duplicate-string': 'off',
         'sonarjs/no-nested-template-literals': 'off',
         'sonarjs/prefer-single-boolean-return': 'off',
       },
     },
     {
       files: ['*.{jsx,tsx}'],
+      excludedFiles: sonarPatterns.excludedFiles,
       rules: {
         // relax complexity for react code
         'sonarjs/cognitive-complexity': ['error', 15],
         // relax duplicate strings
+        'sonarjs/no-duplicate-string': 'off',
+      },
+    },
+    {
+      // relax build/test tool config files as they often contain repeated configuration strings
+      files: [
+        'vitest*.config.{ts,mts}',
+        'vite.config.{ts,mts}',
+        'tsdown.config.{ts,mts}',
+        'webpack.config.{ts,mts}',
+      ],
+      rules: {
         'sonarjs/no-duplicate-string': 'off',
       },
     },

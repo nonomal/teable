@@ -10,7 +10,8 @@ import { getHorizontalRangeInfo, getVerticalRangeInfo, useEventListener } from '
 import type { ILinearRow, IScrollState } from './interface';
 import type { CoordinateManager } from './managers';
 import type { ITimeoutID } from './utils';
-import { cancelTimeout, isWindowsOS, requestTimeout } from './utils/utils';
+import { getWheelDelta } from './utils';
+import { cancelTimeout, requestTimeout } from './utils/utils';
 
 export interface ScrollerProps
   extends Pick<
@@ -67,7 +68,15 @@ const InfiniteScrollerBase: ForwardRefRenderFunction<ScrollerRef, ScrollerProps>
         horizontalScrollRef.current.scrollLeft = sl;
       }
       if (verticalScrollRef.current && st != null) {
-        verticalScrollRef.current.scrollTop = st;
+        const el = verticalScrollRef.current;
+        const scrollableHeight = el.scrollHeight - el.clientHeight;
+        let virtaulOffsetY = 0;
+        if (scrollableHeight > 0 && scrollHeight > el.scrollHeight + 5) {
+          const prog = st / (scrollHeight - el.clientHeight);
+          const actualScrollTop = scrollableHeight * prog;
+          virtaulOffsetY = actualScrollTop - st;
+        }
+        verticalScrollRef.current.scrollTop = st + virtaulOffsetY;
       }
     },
     scrollBy: (deltaX: number, deltaY: number) => {
@@ -195,12 +204,14 @@ const InfiniteScrollerBase: ForwardRefRenderFunction<ScrollerRef, ScrollerProps>
     (event: Event) => {
       if (!scrollEnable) return;
       event.preventDefault();
-      const { deltaX, deltaY, shiftKey } = event as WheelEvent;
-      const fixedDeltaY = shiftKey && isWindowsOS() ? 0 : deltaY;
-      const fixedDeltaX = shiftKey && isWindowsOS() ? deltaY : deltaX;
+      const [fixedDeltaX, fixedDeltaY] = getWheelDelta({
+        event: event as WheelEvent,
+        pageHeight: coordInstance.containerHeight - coordInstance.rowInitSize - 1,
+        lineHeight: coordInstance.rowHeight,
+      });
       scrollHandler(fixedDeltaX, fixedDeltaY);
     },
-    [scrollEnable, scrollHandler]
+    [scrollEnable, scrollHandler, coordInstance]
   );
 
   const onTouchStart = useCallback((e: TouchEvent) => {
@@ -270,7 +281,7 @@ const InfiniteScrollerBase: ForwardRefRenderFunction<ScrollerRef, ScrollerProps>
       <div
         ref={horizontalScrollRef}
         className={cn(
-          'scrollbar scrollbar-thumb-foreground/40 scrollbar-thumb-rounded-md scrollbar-h-[10px] absolute bottom-[2px] left-0 h-4 cursor-pointer overflow-y-hidden overflow-x-scroll will-change-transform',
+          'scrollbar scrollbar-thumb-foreground/40 scrollbar-thumb-rounded-md scrollbar-h-[10px] absolute bottom-[2px] start-0 h-4 cursor-pointer overflow-y-hidden overflow-x-scroll will-change-transform',
           !scrollBarVisible && 'opacity-0 pointer-events-none'
         )}
         style={{
@@ -290,7 +301,7 @@ const InfiniteScrollerBase: ForwardRefRenderFunction<ScrollerRef, ScrollerProps>
       <div
         ref={verticalScrollRef}
         className={cn(
-          'scrollbar scrollbar-thumb-foreground/40 scrollbar-thumb-rounded-md scrollbar-w-[10px] scrollbar-min-thumb absolute right-[2px] w-4 cursor-pointer overflow-x-hidden overflow-y-scroll will-change-transform',
+          'scrollbar scrollbar-thumb-foreground/40 scrollbar-thumb-rounded-md scrollbar-w-[10px] scrollbar-min-thumb absolute end-[2px] w-4 cursor-pointer overflow-x-hidden overflow-y-scroll will-change-transform',
           !scrollBarVisible && 'opacity-0 pointer-events-none'
         )}
         style={{

@@ -1,6 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { context as otelContext, trace as otelTrace } from '@opentelemetry/api';
-import { FieldOpBuilder, IdPrefix, ViewOpBuilder } from '@teable/core';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { FieldOpBuilder, IdPrefix } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import { noop } from 'lodash';
 import { ClsService } from 'nestjs-cls';
@@ -8,12 +7,37 @@ import type { CreateOp, DeleteOp, EditOp } from 'sharedb';
 import ShareDBClass from 'sharedb';
 import { CacheConfig, ICacheConfig } from '../configs/cache.config';
 import { EventEmitterService } from '../event-emitter/event-emitter.service';
+import { SessionHandleService } from '../features/auth/session/session-handle.service';
+import { PerformanceCacheService } from '../performance-cache';
 import type { IClsStore } from '../types/cls';
 import { Timing } from '../utils/timing';
 import { authMiddleware } from './auth.middleware';
 import type { IRawOpMap } from './interface';
-import { ShareDbAdapter } from './share-db.adapter';
+import { RealtimeMetricsService } from './metrics/realtime-metrics.service';
+import { RepairAttachmentOpService } from './repair-attachment-op/repair-attachment-op.service';
+import { ShareDbAdapter, type ComputedActivitySnapshotLoader } from './share-db.adapter';
 import { RedisPubSub } from './sharedb-redis.pubsub';
+
+const v2ProjectionOpSourcePrefix = '@@v2-projection:';
+const v2ProjectionSubmitSource = '@@v2-projection';
+
+const hasClientStream = (
+  agent: unknown
+): agent is { stream: { write?: unknown; send?: unknown } } => {
+  if (!agent || typeof agent !== 'object') {
+    return false;
+  }
+  if (!('stream' in agent)) {
+    return false;
+  }
+
+  const stream = (agent as { stream?: unknown }).stream;
+  if (!stream || typeof stream !== 'object') {
+    return false;
+  }
+
+  return 'write' in stream || 'send' in stream;
+};
 
 @Injectable()
 export class ShareDbService extends ShareDBClass {
@@ -24,12 +48,17 @@ export class ShareDbService extends ShareDBClass {
     private readonly eventEmitterService: EventEmitterService,
     private readonly prismaService: PrismaService,
     private readonly cls: ClsService<IClsStore>,
-    @CacheConfig() private readonly cacheConfig: ICacheConfig
+    private readonly repairAttachmentOpService: RepairAttachmentOpService,
+    @CacheConfig() private readonly cacheConfig: ICacheConfig,
+    private readonly performanceCacheService: PerformanceCacheService,
+    private readonly sessionHandleService: SessionHandleService,
+    @Optional() private readonly realtimeMetrics?: RealtimeMetricsService
   ) {
     super({
       presence: true,
       doNotForwardSendPresenceErrorsToClient: true,
       db: shareDbAdapter,
+      maxSubmitRetries: 3,
     });
 
     const { provider, redis } = this.cacheConfig;
@@ -43,13 +72,17 @@ export class ShareDbService extends ShareDBClass {
       this.pubsub = redisPubsub;
     }
 
-    authMiddleware(this);
+    authMiddleware(this, this.sessionHandleService);
     this.use('submit', this.onSubmit);
 
     // broadcast raw op events to client
-    this.prismaService.bindAfterTransaction(() => {
+    this.prismaService.bindAfterTransaction(async () => {
+      // Consume both CLS slots synchronously, before the first await, so a
+      // following $tx in the same request can never see or lose them.
       const rawOpMaps = this.cls.get('tx.rawOpMaps');
       this.cls.set('tx.rawOpMaps', undefined);
+      const clearCacheKeys = this.cls.get('clearCacheKeys');
+      this.cls.set('clearCacheKeys', undefined);
 
       const ops: IRawOpMap[] = [];
       if (rawOpMaps?.length) {
@@ -57,8 +90,23 @@ export class ShareDbService extends ShareDBClass {
       }
 
       if (ops.length) {
-        this.publishOpsMap(rawOpMaps);
-        this.eventEmitterService.ops2Event(ops);
+        try {
+          await this.updateTableMetaByRawOpMap(rawOpMaps);
+          await this.publishOpsMap(rawOpMaps);
+          this.eventEmitterService.ops2Event(ops);
+        } catch (error) {
+          // Not awaited by $tx(): an error here would surface as an unhandled
+          // rejection and skip the cache flush below.
+          this.logger.error(
+            `Failed to broadcast ops after transaction: ${error instanceof Error ? error.message : String(error)}`,
+            error instanceof Error ? error.stack : undefined
+          );
+        }
+      }
+
+      // clear cache keys
+      if (clearCacheKeys?.length) {
+        await Promise.all(clearCacheKeys.map((key) => this.performanceCacheService.del(key)));
       }
     });
   }
@@ -67,12 +115,42 @@ export class ShareDbService extends ShareDBClass {
     return this.connect();
   }
 
+  setComputedActivitySnapshotLoader(loader: ComputedActivitySnapshotLoader): void {
+    this.shareDbAdapter.setComputedActivitySnapshotLoader(loader);
+  }
+
   @Timing()
-  publishOpsMap(rawOpMaps: IRawOpMap[] | undefined) {
+  private async updateTableMetaByRawOpMap(rawOpMap?: IRawOpMap[]) {
+    if (!rawOpMap?.length) {
+      return;
+    }
+    const collection = rawOpMap.flatMap((map) => Object.keys(map));
+    const tableIds = collection
+      .filter(
+        (c) =>
+          c.startsWith(IdPrefix.Record) ||
+          c.startsWith(IdPrefix.View) ||
+          c.startsWith(IdPrefix.Field)
+      )
+      .map((c) => c.split('_')[1]);
+
+    if (!tableIds.length) {
+      return;
+    }
+    await this.prismaService.txClient().tableMeta.updateMany({
+      where: { id: { in: tableIds } },
+      data: { lastModifiedTime: new Date().toISOString() },
+    });
+  }
+
+  @Timing()
+  async publishOpsMap(rawOpMaps: IRawOpMap[] | undefined) {
     if (!rawOpMaps?.length) {
       return;
     }
-
+    let publishCount = 0;
+    const repairAttachmentContext =
+      await this.repairAttachmentOpService.getCollectionsAttachmentsContext(rawOpMaps);
     for (const rawOpMap of rawOpMaps) {
       for (const collection in rawOpMap) {
         const data = rawOpMap[collection];
@@ -81,59 +159,78 @@ export class ShareDbService extends ShareDBClass {
           const channels = [collection, `${collection}.${docId}`];
           rawOp.c = collection;
           rawOp.d = docId;
-          this.pubsub.publish(channels, rawOp, noop);
+          const repairedOp = await this.repairAttachmentOpService.repairAttachmentOp(
+            rawOp,
+            repairAttachmentContext
+          );
+          this.pubsub.publish(channels, repairedOp, noop);
+          publishCount++;
 
-          if (this.shouldPublishAction(rawOp)) {
+          if (this.shouldForwardToRecordChannel(repairedOp)) {
             const tableId = collection.split('_')[1];
-            this.publishRelatedChannels(tableId, rawOp);
+            this.forwardToRecordChannel(tableId, repairedOp);
           }
         }
       }
     }
+    if (publishCount > 0) {
+      this.realtimeMetrics?.recordOpsPublished(publishCount);
+    }
   }
 
-  // for update record when import
+  // synthetic ops that only wake record query polling, never doc subscribers
+  // (no doc id): import progress and manual row reorder
   publishRecordChannel(tableId: string, rawOp: EditOp | CreateOp | DeleteOp) {
     this.pubsub.publish([`${IdPrefix.Record}_${tableId}`], rawOp, noop);
   }
 
-  private shouldPublishAction(rawOp: EditOp | CreateOp | DeleteOp) {
-    const viewKeys = ['filter', 'sort', 'group', 'lastModifiedTime'];
+  // field options shape record query result semantics (e.g. select choice
+  // order drives sorting) without emitting record ops, so their changes must
+  // wake record query subscriptions; the adapter's skipPoll narrows the
+  // fan-out to subscriptions referencing the field. View condition changes
+  // are not forwarded: clients inline view conditions into the query and
+  // resubscribe on change. Manual row reorder emits a synthetic record op
+  // itself (see ViewOpenApiService.publishRowOrderChange)
+  private shouldForwardToRecordChannel(rawOp: EditOp | CreateOp | DeleteOp) {
     const fieldKeys = ['options'];
-    return rawOp.op?.some(
-      (op) =>
-        viewKeys.includes(ViewOpBuilder.editor.setViewProperty.detect(op)?.key as string) ||
-        fieldKeys.includes(FieldOpBuilder.editor.setFieldProperty.detect(op)?.key as string)
+    return rawOp.op?.some((op) =>
+      fieldKeys.includes(FieldOpBuilder.editor.setFieldProperty.detect(op)?.key as string)
     );
   }
 
-  /**
-   * this is for some special scenarios like manual sort
-   * which only send view ops but update record too
-   */
-  private publishRelatedChannels(tableId: string, rawOp: EditOp | CreateOp | DeleteOp) {
+  private forwardToRecordChannel(tableId: string, rawOp: EditOp | CreateOp | DeleteOp) {
     this.pubsub.publish([`${IdPrefix.Record}_${tableId}`], rawOp, noop);
-    this.pubsub.publish([`${IdPrefix.Field}_${tableId}`], rawOp, noop);
   }
 
   private onSubmit = (
     context: ShareDBClass.middleware.SubmitContext,
     next: (err?: unknown) => void
   ) => {
-    const tracer = otelTrace.getTracer('default');
-    const currentSpan = tracer.startSpan('submitOp');
+    const submitSource =
+      ((context as ShareDBClass.middleware.SubmitContext & { options?: { source?: unknown } })
+        .options?.source as unknown) ??
+      ((context as ShareDBClass.middleware.SubmitContext & { extra?: { source?: unknown } }).extra
+        ?.source as unknown);
+    if (submitSource === v2ProjectionSubmitSource) {
+      return next();
+    }
 
-    // console.log('onSubmit start');
+    const opSource = typeof context.op.src === 'string' ? context.op.src : '';
+    if (opSource.startsWith(v2ProjectionOpSourcePrefix)) {
+      return next();
+    }
 
-    otelContext.with(otelTrace.setSpan(otelContext.active(), currentSpan), () => {
-      const [docType] = context.collection.split('_');
+    if (!hasClientStream(context.agent)) {
+      return next();
+    }
 
-      if (docType !== IdPrefix.Record || !context.op.op) {
-        return next(new Error('only record op can be committed'));
-      }
-      next();
-    });
+    const [docType] = context.collection.split('_');
 
-    // console.log('onSubmit end');
+    if (docType !== IdPrefix.Record || !context.op.op) {
+      this.realtimeMetrics?.recordOperationError('invalid_doc_type');
+      return next(new Error('only record op can be committed'));
+    }
+    this.realtimeMetrics?.recordOperationSubmit();
+    next();
   };
 }

@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import { z } from '../../zod';
-import { type FieldAction, type RecordAction, type ViewAction } from '../actions';
+import type { TableAction, FieldAction, RecordAction, ViewAction } from '../actions';
 import { Role } from './types';
 
 export const TableRole = {
@@ -9,8 +9,8 @@ export const TableRole = {
   Viewer: Role.Viewer,
 } as const;
 
-export const tableRolesSchema = z.nativeEnum(TableRole);
+export const tableRolesSchema = z.enum(TableRole);
 
 export type ITableRole = z.infer<typeof tableRolesSchema>;
 
-export type TablePermission = ViewAction | FieldAction | RecordAction;
+export type TablePermission = ViewAction | FieldAction | RecordAction | TableAction;

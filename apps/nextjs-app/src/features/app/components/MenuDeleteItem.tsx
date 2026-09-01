@@ -27,7 +27,7 @@ export const MenuDeleteItem = React.forwardRef<
       <DropdownMenuItem
         ref={ref}
         disabled={disabled}
-        className="text-destructive focus:bg-destructive/20 focus:text-destructive dark:focus:bg-destructive dark:focus:text-foreground"
+        className="text-destructive focus:bg-destructive/10 focus:text-destructive"
         onClick={(e) => {
           setDeleteAlter(true);
           e.preventDefault();
@@ -36,14 +36,14 @@ export const MenuDeleteItem = React.forwardRef<
       >
         {children ?? (
           <>
-            <Trash2 className="mr-1.5" />
+            <Trash2 className="me-1.5" />
             {t('actions.delete')}
           </>
         )}
       </DropdownMenuItem>
       <div
         className={cn(
-          'absolute size-full flex bottom-0 items-center gap-1 justify-between bg-background translate-y-full transition-transform',
+          'absolute size-full flex bottom-0 items-center gap-1 justify-between bg-popover translate-y-full transition-transform',
           {
             'translate-y-0': deleteAlter,
           }

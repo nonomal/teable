@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { userMe } from '@teable/openapi';
-import { useCallback, useMemo, useState } from 'react';
+import { isAnonymous } from '@teable/core';
+import { updateUserLang, userMe } from '@teable/openapi';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from '../app/i18n';
 import type { IUser } from './SessionContext';
 import { SessionContext } from './SessionContext';
 
@@ -14,6 +16,7 @@ export const SessionProvider: React.FC<React.PropsWithChildren<ISessionProviderP
   props
 ) => {
   const { user, fallback, children, disabledApi = false } = props;
+  const { lang } = useTranslation();
   const queryClient = useQueryClient();
   const [currentUser, setCurrentUser] = useState<IUser | undefined>(() => {
     if (user) {
@@ -22,11 +25,23 @@ export const SessionProvider: React.FC<React.PropsWithChildren<ISessionProviderP
     return undefined;
   });
 
+  const { mutateAsync: updateLang } = useMutation({
+    mutationFn: (ro: { lang: string }) => updateUserLang(ro),
+  });
+
   const { data: userQuery } = useQuery({
     queryKey: ['user-me'],
     queryFn: () => userMe().then((res) => res.data),
     enabled: !disabledApi,
   });
+
+  // Handle onSuccess logic after data is fetched (v5 migration)
+  useEffect(() => {
+    if (userQuery && !userQuery.lang && lang && !isAnonymous(userQuery.id)) {
+      updateLang({ lang });
+    }
+  }, [userQuery, lang, updateLang]);
+
   const { mutateAsync: getUser } = useMutation({ mutationFn: userMe });
 
   const refresh = useCallback(async () => {
@@ -53,7 +68,14 @@ export const SessionProvider: React.FC<React.PropsWithChildren<ISessionProviderP
   }, [currentUser, refresh]);
 
   const value = useMemo(
-    () => ({ user: userQuery || currentUser, refresh, refreshAvatar }),
+    () => ({
+      user: {
+        ...(userQuery ?? {}),
+        ...(currentUser ?? {}),
+      } as IUser,
+      refresh,
+      refreshAvatar,
+    }),
     [currentUser, userQuery, refresh, refreshAvatar]
   );
 

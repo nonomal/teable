@@ -298,12 +298,12 @@ const QueryBuilderContainer = forwardRef<
     <div className={cn('relative rounded border py-4 px-2', className)}>
       {depth > 0 && (
         <Button
-          className="absolute right-1 top-1 h-auto rounded-full p-0.5 text-[13px]"
+          className="absolute end-1 top-1 h-auto rounded-full p-0.5 text-[13px]"
           size={'xs'}
           variant={'outline'}
           onClick={() => onChange(undefined)}
         >
-          <X />
+          <X className="size-4 shrink-0" />
         </Button>
       )}
       <QueryFrom addButton={!fromType} maxDepth={maxDepth <= depth + 1} onClick={onFromChange}>

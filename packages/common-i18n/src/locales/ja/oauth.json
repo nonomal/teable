@@ -2,7 +2,8 @@
   "add": "新しいOAuthアプリ",
   "title": {
     "add": "新しいOAuthアプリ",
-    "edit": "OAuthアプリの編集"
+    "edit": "OAuthアプリの編集",
+    "description": "Teable アプリはユーザーになりすますことなく、自身の権限で API を通じて直接操作を実行できます。詳しくは<a>ヘルプドキュメント</a>をご覧ください。"
   },
   "form": {
     "name": {
@@ -10,8 +11,7 @@
       "description": "OAuthアプリの名前。"
     },
     "description": {
-      "label": "説明",
-      "description": "OAuthアプリの簡単な説明。"
+      "label": "説明"
     },
     "homePageUrl": {
       "label": "ホームページURL",
@@ -30,10 +30,6 @@
       "label": "コールバックURL",
       "description": "ユーザーが統合を承認した後にリダイレクトする完全なURL。",
       "add": "コールバックURLを追加"
-    },
-    "scopes": {
-      "label": "Scopes",
-      "description": "OAuthアプリに必要な権限。"
     },
     "secret": {
       "label": "クライアントシークレット",
@@ -59,5 +55,13 @@
     "scopes": "このアプリケーションは、次のscopeを取得できます:",
     "redirectDescription": "承認するとリダイレクトされます",
     "authorize": "承認"
+  },
+  "help": {
+    "link": "https://help.teable.ai/en/api-doc/oauth",
+    "title": "詳細を見る"
+  },
+  "deleteConfirm": {
+    "title": "OAuth アプリを削除",
+    "description": "OAuth アプリ「{{name}}」を削除してもよろしいですか？この操作は取り消せません。"
   }
 }

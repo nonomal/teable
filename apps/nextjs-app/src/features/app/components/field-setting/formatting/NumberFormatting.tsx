@@ -1,5 +1,9 @@
 import type { ICurrencyFormatting, INumberFormatting } from '@teable/core';
-import { NumberFormattingType, defaultNumberFormatting } from '@teable/core';
+import {
+  NumberFormattingType,
+  defaultNumberFormatting,
+  numberFormattingSchema,
+} from '@teable/core';
 import { Input } from '@teable/ui-lib/shadcn';
 import { Label } from '@teable/ui-lib/shadcn/ui/label';
 import {
@@ -10,6 +14,7 @@ import {
   SelectValue,
 } from '@teable/ui-lib/shadcn/ui/select';
 import { useTranslation } from 'next-i18next';
+import { useMemo } from 'react';
 
 interface IProps {
   formatting?: INumberFormatting;
@@ -17,19 +22,25 @@ interface IProps {
 }
 
 export const NumberFormatting: React.FC<IProps> = (props) => {
-  const { formatting = defaultNumberFormatting, onChange } = props;
+  const { formatting: formattingProp, onChange } = props;
+  // A truthy but mismatched formatting object (e.g. a persisted datetime
+  // formatting reaching this component while a rollup result type is being
+  // inferred) must not crash the editor: fall back to the default instead of
+  // reading missing fields off it.
+  const formatting = useMemo(() => {
+    const parsed = numberFormattingSchema.safeParse(formattingProp ?? defaultNumberFormatting);
+    return parsed.success ? parsed.data : defaultNumberFormatting;
+  }, [formattingProp]);
   const { type, precision } = formatting;
   const { t } = useTranslation(['table']);
 
   const onFormattingTypeChange = (type: NumberFormattingType) => {
-    const newFormatting =
-      type === NumberFormattingType.Currency && (formatting as ICurrencyFormatting).symbol == null
-        ? {
-            type,
-            symbol: t('field.default.number.defaultSymbol'),
-          }
-        : { type };
-    onChange?.({ ...formatting, ...newFormatting } as INumberFormatting);
+    const { symbol: _symbol, ...rest } = formatting as ICurrencyFormatting;
+    if (type === NumberFormattingType.Currency) {
+      onChange?.({ ...rest, type, symbol: _symbol ?? t('field.default.number.defaultSymbol') });
+    } else {
+      onChange?.({ ...rest, type } as INumberFormatting);
+    }
   };
 
   const onPrecisionChange = (value: string) => {
@@ -87,11 +98,11 @@ export const NumberFormatting: React.FC<IProps> = (props) => {
   ];
 
   return (
-    <div className="flex w-full flex-col gap-2">
+    <div className="border-bordr flex w-full flex-col gap-4 border-t pt-4">
       <div className="flex w-full flex-col gap-2">
-        <Label className="font-normal">{t('field.default.number.formatType')}</Label>
+        <Label className="text-sm font-medium">{t('field.default.number.formatType')}</Label>
         <Select value={type} onValueChange={onFormattingTypeChange}>
-          <SelectTrigger className="h-8 w-full">
+          <SelectTrigger size="lg">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -106,10 +117,12 @@ export const NumberFormatting: React.FC<IProps> = (props) => {
       <>
         {type === NumberFormattingType.Currency && (
           <div className="flex w-full flex-col gap-2">
-            <Label className="font-normal">{t('field.default.number.currencySymbol')}</Label>
+            <Label className="text-sm font-medium">
+              {t('field.default.number.currencySymbol')}
+            </Label>
             <Input
               placeholder={t('field.default.number.currencySymbol')}
-              className="h-8"
+              size="lg"
               value={formatting.symbol}
               onChange={onSymbolChange}
             />
@@ -117,9 +130,9 @@ export const NumberFormatting: React.FC<IProps> = (props) => {
         )}
       </>
       <div className="flex w-full flex-col gap-2">
-        <Label className="font-normal">{t('field.default.number.precision')}</Label>
+        <Label className="font-medium ">{t('field.default.number.precision')}</Label>
         <Select value={precision.toString()} onValueChange={onPrecisionChange}>
-          <SelectTrigger className="h-8 w-full">
+          <SelectTrigger size="lg">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

@@ -1,58 +1,93 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
 import { z } from 'zod';
 import { axios } from '../axios';
-import { BillingProductLevel } from '../billing';
+import { BillingProductLevel, appSumoTierSchema } from '../billing';
 import { registerRoute, urlBuilder } from '../utils';
 
 export enum UsageFeature {
   NumRows = 'numRows',
   AttachmentSize = 'attachmentSize',
   NumDatabaseConnections = 'numDatabaseConnections',
+  NumCollaborators = 'numCollaborators',
+  NumSystemSendEmail = 'numSystemSendEmail',
+  NumAutomationRuns = 'numAutomationRuns',
 }
 
 export const usageFeatureSchema = z.object({
   [UsageFeature.NumRows]: z.number(),
   [UsageFeature.AttachmentSize]: z.number(),
   [UsageFeature.NumDatabaseConnections]: z.number(),
+  [UsageFeature.NumCollaborators]: z.number(),
+  [UsageFeature.NumSystemSendEmail]: z.number(),
+  [UsageFeature.NumAutomationRuns]: z.number(),
 });
 
 export enum UsageFeatureLimit {
   MaxRows = 'maxRows',
   MaxSizeAttachments = 'maxSizeAttachments',
+  MaxNumAutomationRuns = 'maxNumAutomationRuns',
   MaxNumDatabaseConnections = 'maxNumDatabaseConnections',
   MaxRevisionHistoryDays = 'maxRevisionHistoryDays',
+  MaxTrashReadDays = 'maxTrashReadDays',
   MaxAutomationHistoryDays = 'maxAutomationHistoryDays',
   AutomationEnable = 'automationEnable',
   AuditLogEnable = 'auditLogEnable',
   AdminPanelEnable = 'adminPanelEnable',
   RowColoringEnable = 'rowColoringEnable',
   ButtonFieldEnable = 'buttonFieldEnable',
+  FieldAIEnable = 'fieldAIEnable',
   UserGroupEnable = 'userGroupEnable',
   AdvancedExtensionsEnable = 'advancedExtensionsEnable',
   AdvancedPermissionsEnable = 'advancedPermissionsEnable',
   PasswordRestrictedSharesEnable = 'passwordRestrictedSharesEnable',
+  AuthenticationEnable = 'authenticationEnable',
+  DomainVerificationEnable = 'domainVerificationEnable',
+  OrganizationEnable = 'organizationEnable',
+  APIRateLimit = 'apiRateLimit',
+  ChatAIEnable = 'chatAIEnable',
+  ArchiveEnable = 'archiveEnable',
+  GithubSyncEnable = 'githubSyncEnable',
+  AppEnable = 'appEnable',
+  AppHideBadgeEnable = 'appHideBadgeEnable',
+  CustomDomainEnable = 'customDomainEnable',
+  MaxNumSystemSendEmail = 'maxNumSystemSendEmail',
 }
 
 export const usageFeatureLimitSchema = z.object({
   [UsageFeatureLimit.MaxRows]: z.number(),
   [UsageFeatureLimit.MaxSizeAttachments]: z.number(),
+  [UsageFeatureLimit.MaxNumAutomationRuns]: z.number(),
   [UsageFeatureLimit.MaxNumDatabaseConnections]: z.number(),
   [UsageFeatureLimit.MaxRevisionHistoryDays]: z.number(),
+  [UsageFeatureLimit.MaxTrashReadDays]: z.number(),
   [UsageFeatureLimit.MaxAutomationHistoryDays]: z.number(),
   [UsageFeatureLimit.AutomationEnable]: z.boolean(),
   [UsageFeatureLimit.AuditLogEnable]: z.boolean(),
   [UsageFeatureLimit.AdminPanelEnable]: z.boolean(),
   [UsageFeatureLimit.RowColoringEnable]: z.boolean(),
   [UsageFeatureLimit.ButtonFieldEnable]: z.boolean(),
+  [UsageFeatureLimit.FieldAIEnable]: z.boolean(),
   [UsageFeatureLimit.UserGroupEnable]: z.boolean(),
   [UsageFeatureLimit.AdvancedExtensionsEnable]: z.boolean(),
   [UsageFeatureLimit.AdvancedPermissionsEnable]: z.boolean(),
   [UsageFeatureLimit.PasswordRestrictedSharesEnable]: z.boolean(),
+  [UsageFeatureLimit.AuthenticationEnable]: z.boolean(),
+  [UsageFeatureLimit.DomainVerificationEnable]: z.boolean(),
+  [UsageFeatureLimit.OrganizationEnable]: z.boolean(),
+  [UsageFeatureLimit.APIRateLimit]: z.number(),
+  [UsageFeatureLimit.ChatAIEnable]: z.boolean(),
+  [UsageFeatureLimit.ArchiveEnable]: z.boolean(),
+  [UsageFeatureLimit.GithubSyncEnable]: z.boolean(),
+  [UsageFeatureLimit.AppEnable]: z.boolean(),
+  [UsageFeatureLimit.AppHideBadgeEnable]: z.boolean(),
+  [UsageFeatureLimit.CustomDomainEnable]: z.boolean(),
+  [UsageFeatureLimit.MaxNumSystemSendEmail]: z.number(),
 });
 
 export const usageVoSchema = z.object({
-  level: z.nativeEnum(BillingProductLevel),
+  level: z.enum(BillingProductLevel),
   limit: usageFeatureLimitSchema,
+  appSumoTier: appSumoTierSchema.optional(),
 });
 
 export type IUsageVo = z.infer<typeof usageVoSchema>;

@@ -1,14 +1,15 @@
-import { useMutation } from '@tanstack/react-query';
-import type { IFieldVo } from '@teable/core';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import type { IAttachmentItem, IFieldVo, IGridViewOptions } from '@teable/core';
 import {
   FieldKeyType,
+  FieldType,
   RowHeightLevel,
   contractColorForTheme,
   fieldVoSchema,
   stringifyClipboardText,
 } from '@teable/core';
 import type { ICreateRecordsRo, IGroupPointsVo, IUpdateOrderRo } from '@teable/openapi';
-import { createRecords } from '@teable/openapi';
+import { createRecords, stopFillField, autoFillCell } from '@teable/openapi';
 import type {
   IRectangle,
   IPosition,
@@ -16,10 +17,14 @@ import type {
   ICellItem,
   ICell,
   IInnerCell,
-  Record,
   GridView,
   IGroupPoint,
   IUseTablePermissionAction,
+  IRange,
+  Record,
+  IButtonCell,
+  ICellError,
+  IUserData,
 } from '@teable/sdk';
 import {
   Grid,
@@ -38,6 +43,7 @@ import {
   useCommentCountMap,
   useGridIcons,
   useGridTooltipStore,
+  useUserInfoPopoverStore,
   hexToRGBA,
   emptySelection,
   useGridGroupCollection,
@@ -48,14 +54,26 @@ import {
   SelectableType,
   useGridRowOrder,
   ExpandRecorder,
+  useGridViewStore,
+  useGridSelection,
+  DragRegionType,
+  useGridFileEvent,
+  extractDefaultFieldsFromFilters,
+  TaskStatusCollectionContext,
+  PendingUploadContext,
+  isNeedPersistEditing,
 } from '@teable/sdk';
 import { GRID_DEFAULT } from '@teable/sdk/components/grid/configs';
 import { useScrollFrameRate } from '@teable/sdk/components/grid/hooks';
+import { ReactQueryKeys } from '@teable/sdk/config';
+import { ShareViewContext } from '@teable/sdk/context';
 import {
-  useFieldCellEditable,
+  useBaseId,
   useFields,
   useIsTouchDevice,
+  usePersonalView,
   useRowCount,
+  useSession,
   useSSRRecord,
   useSSRRecords,
   useTableId,
@@ -63,99 +81,310 @@ import {
   useUndoRedo,
   useView,
   useViewId,
+  useRecordOperations,
+  useButtonClickStatus,
+  useSearch,
+  useTableListener,
 } from '@teable/sdk/hooks';
-import { useToast } from '@teable/ui-lib';
+import {
+  finalizePendingUploadAfterCreate,
+  mergePendingAttachmentsForCreate,
+} from '@teable/sdk/store/pending-upload-create';
+import { useCellAttachmentUploadStore } from '@teable/sdk/store/use-attachment-upload-store';
+import { useConfirm } from '@teable/ui-lib';
+import { toast, toast as sonnerToast } from '@teable/ui-lib/shadcn/ui/sonner';
 import { isEqual, keyBy, uniqueId, groupBy } from 'lodash';
 import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useHotkeys } from 'react-hotkeys-hook';
 import { usePrevious, useClickAway } from 'react-use';
-import { ExpandRecordContainer } from '@/features/app/components/ExpandRecordContainer';
-import type { IExpandRecordContainerRef } from '@/features/app/components/ExpandRecordContainer/types';
+import { computeFrozenColumnCount } from '@/features/app/blocks/view/grid/utils/computeFrozenFields';
+import { ExpandRecordContainer } from '@/features/app/components/expand-record-container';
+import type { IExpandRecordContainerRef } from '@/features/app/components/expand-record-container/types';
+import { useShareAllowCopy, useShareContext } from '@/features/app/context/ShareContext';
+import { useBaseUsage } from '@/features/app/hooks/useBaseUsage';
+import { useDisableAIAction } from '@/features/app/hooks/useDisableAIAction';
 import { tableConfig } from '@/features/i18n/table.config';
 import { FieldOperator } from '../../../components/field-setting';
 import { useFieldSettingStore } from '../field/useFieldSettingStore';
-import { PrefillingRowContainer } from './components';
+import { useContextMenu } from '../hooks/useContextMenu';
+import type { IAiAutoFillDialogContainerRef } from './components';
+import {
+  AiAutoFillDialogContainer,
+  AiGenerateButton,
+  ClearSelectionProgressDialog,
+  DeleteSelectionProgressDialog,
+  DuplicateSelectionProgressDialog,
+  PasteSelectionProgressDialog,
+  PrefillingRowContainer,
+  PresortRowContainer,
+  SelectionStatistic,
+} from './components';
 import type { IConfirmNewRecordsRef } from './components/ConfirmNewRecords';
 import { ConfirmNewRecords } from './components/ConfirmNewRecords';
-import { GIRD_ROW_HEIGHT_DEFINITIONS } from './const';
+import { ResetClickCountButton } from './components/ResetClickCountButton';
+import { GIRD_FIELD_NAME_HEIGHT_DEFINITIONS, GIRD_ROW_HEIGHT_DEFINITIONS } from './const';
 import { DomBox } from './DomBox';
 import { useCollaborate, useSelectionOperation } from './hooks';
-import { useGridViewStore } from './store/gridView';
+import { useIsSelectionLoaded } from './hooks/useIsSelectionLoaded';
+import { useGridSearchStore } from './useGridSearchStore';
+import {
+  buildFillSelectionPaste,
+  getEffectRows,
+  getGroupValuesByRowIndex,
+  shouldUseDeleteSelectionStream,
+} from './utils';
+import { downgradeCrossBaseHeaders, isCrossBaseField } from './utils/crossBaseLink';
+import { getSyncCopyData } from './utils/getSyncCopyData';
+import {
+  cacheColumnSelectionForChat,
+  cacheSelectionForChat,
+  isSingleCellSelection,
+} from './utils/gridSelectionChat';
 
 interface IGridViewBaseInnerProps {
-  groupPointsServerData?: IGroupPointsVo;
+  groupPointsServerData?: IGroupPointsVo | null;
   onRowExpand?: (recordId: string) => void;
 }
 
 const { scrollBuffer, columnAppendBtnWidth } = GRID_DEFAULT;
 
+const getColumnIconTooltip = (type: RegionType, icon: string | undefined, primaryText: string) => {
+  if (type === RegionType.ColumnPrimaryIcon) return primaryText;
+  if (type === RegionType.ColumnIcon && icon === 'calculating') return 'Calculating this field…';
+  return null;
+};
+
 export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
   props: IGridViewBaseInnerProps
+  // eslint-disable-next-line sonarjs/cognitive-complexity
 ) => {
   const { groupPointsServerData, onRowExpand } = props;
-  const { t } = useTranslation(tableConfig.i18nNamespaces);
+  const { t, i18n } = useTranslation(tableConfig.i18nNamespaces);
+  const queryClient = useQueryClient();
+  const { updateRecord, duplicateRecord } = useRecordOperations();
   const router = useRouter();
-  const gridRef = useRef<IGridRef>(null);
-  const prefillingGridRef = useRef<IGridRef>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const expandRecordRef = useRef<IExpandRecordContainerRef>(null);
+  const baseId = useBaseId();
   const tableId = useTableId() as string;
   const activeViewId = useViewId();
+  const { user } = useSession();
   const view = useView(activeViewId) as GridView | undefined;
   const rowCount = useRowCount();
   const ssrRecords = useSSRRecords();
   const ssrRecord = useSSRRecord();
   const theme = useGridTheme();
   const fields = useFields();
-  const { columns: originalColumns, cellValue2GridDisplay } = useGridColumns();
+  const usage = useBaseUsage();
+  const { aiField: aiFieldEnabled } = useDisableAIAction();
+  const allFields = useFields({ withHidden: true });
+  const taskStatusCollection = useContext(TaskStatusCollectionContext);
+  const { shareId } = useShareContext();
+  // Attachment uploads must carry the share-VIEW id (sent as the Tea-Share-Id
+  // header → share-view auth). ShareContext.shareId is also set under a base
+  // share, where it's the BASE-share id — sending that as Tea-Share-Id would
+  // misroute the request to share-view auth and break base-share uploads. The
+  // share-view id lives only in ShareViewContext (empty outside a share view).
+  const { shareId: shareViewId } = useContext(ShareViewContext);
+  const buttonClickStatusHook = useButtonClickStatus(tableId, shareId);
+  const { setGridRef, searchCursor, highlightedFieldId, setRecordMap, setFields } =
+    useGridSearchStore();
+  const { columns: originalColumns, cellValue2GridDisplay } = useGridColumns(
+    undefined,
+    undefined,
+    highlightedFieldId
+  );
   const { columns, onColumnResize } = useGridColumnResize(originalColumns);
   const { columnStatistics } = useGridColumnStatistics(columns);
   const { onColumnOrdered } = useGridColumnOrder();
-  const { openRecordMenu, openHeaderMenu, openStatisticMenu, setSelection, selection } =
-    useGridViewStore();
+  const {
+    selection,
+    setSelection,
+    openRecordMenu,
+    openHeaderMenu,
+    openStatisticMenu,
+    openGroupHeaderMenu,
+  } = useGridViewStore();
   const { openSetting } = useFieldSettingStore();
   const { openTooltip, closeTooltip } = useGridTooltipStore();
+  const calculationTooltipOpenRef = useRef(false);
+  const hasCalculatingColumn = columns.some((column) => column.icon === 'calculating');
+
+  useEffect(() => {
+    if (hasCalculatingColumn || !calculationTooltipOpenRef.current) return;
+    calculationTooltipOpenRef.current = false;
+    closeTooltip();
+  }, [closeTooltip, hasCalculatingColumn]);
+  const { openPopover: openUserPopover, closePopover: closeUserPopover } =
+    useUserInfoPopoverStore();
   const preTableId = usePrevious(tableId);
   const isTouchDevice = useIsTouchDevice();
   const sort = view?.sort;
   const group = view?.group;
   const isAutoSort = sort && !sort?.manualSort;
-  const frozenColumnCount = isTouchDevice ? 0 : view?.options?.frozenColumnCount ?? 1;
+  // Fields whose edit re-positions the row: auto-sort + group fields.
+  const moveTriggerFieldIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (isAutoSort) sort?.sortObjs?.forEach((sortObj) => ids.add(sortObj.fieldId));
+    group?.forEach((groupObj) => ids.add(groupObj.fieldId));
+    return ids;
+  }, [isAutoSort, sort, group]);
+  const { frozenFieldId, frozenColumnCount: frozenColumnCountOption } = (view?.options ??
+    {}) as IGridViewOptions;
+  const frozenColumnCount = useMemo(() => {
+    return computeFrozenColumnCount({
+      isTouchDevice,
+      frozenFieldId,
+      frozenColumnCount: frozenColumnCountOption,
+      visibleColumns: columns,
+      allFields,
+    });
+  }, [isTouchDevice, frozenFieldId, columns, allFields, frozenColumnCountOption]);
+  const { cells: taskStatusCells, fieldMap: taskStatusFieldMap } = taskStatusCollection ?? {};
+  const rowHeight = GIRD_ROW_HEIGHT_DEFINITIONS[view?.options?.rowHeight ?? RowHeightLevel.Short];
+  const columnHeaderHeight =
+    GIRD_FIELD_NAME_HEIGHT_DEFINITIONS[view?.options?.fieldNameDisplayLines ?? 1];
   const permission = useTablePermission();
-  const { toast } = useToast();
+
+  const shareAllowCopy = useShareAllowCopy();
   const realRowCount = rowCount ?? ssrRecords?.length ?? 0;
-  const fieldEditable = useFieldCellEditable();
+  const fieldEditable = permission['field|update'];
   const { undo, redo } = useUndoRedo();
   const [expandRecord, setExpandRecord] = useState<{ tableId: string; recordId: string }>();
-  const confirmNewRecordsRef = useRef<IConfirmNewRecordsRef>(null);
   const [newRecords, setNewRecords] = useState<ICreateRecordsRo['records']>();
+  const [cellErrors, setCellErrors] = useState<ICellError[]>([]);
+
+  const { fieldAIEnable: billingFieldAIEnable = false } = usage?.limit ?? {};
+  const fieldAIEnable = billingFieldAIEnable && aiFieldEnabled;
+
+  const aiAutoFillDialogRef = useRef<IAiAutoFillDialogContainerRef>(null);
+
+  const aiGenerateButtonRef = useRef<{
+    onScrollHandler: () => void;
+  }>(null);
+  const resetClickCountButtonRef = useRef<{
+    onScrollHandler: () => void;
+  }>(null);
+
+  const gridRef = useRef<IGridRef>(null);
+  const presortGridRef = useRef<IGridRef>(null);
+  const prefillingGridRef = useRef<IGridRef>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const expandRecordRef = useRef<IExpandRecordContainerRef>(null);
+  const confirmNewRecordsRef = useRef<IConfirmNewRecordsRef>(null);
 
   const groupCollection = useGridGroupCollection();
 
+  const { personalViewCommonQuery } = usePersonalView();
   const { viewQuery, collapsedGroupIds, onCollapsedGroupChanged } = useGridCollapsedGroup(
-    generateLocalId(tableId, activeViewId)
+    generateLocalId(tableId, activeViewId),
+    personalViewCommonQuery
   );
+  const { filteringSearchQuery } = useSearch();
 
-  const { onVisibleRegionChanged, onReset, recordMap, groupPoints, recordsQuery } =
-    useGridAsyncRecords(ssrRecords, undefined, viewQuery, groupPointsServerData);
+  useEffect(() => {
+    if (!baseId || !activeViewId) return;
+    const queryKey = ReactQueryKeys.activeViewContext(baseId);
+
+    queryClient.setQueryData(queryKey, {
+      tableId,
+      viewId: activeViewId,
+      query: { ...viewQuery, search: filteringSearchQuery },
+    });
+
+    return () => {
+      const current = queryClient.getQueryData<{ viewId?: string }>(queryKey);
+      if (current?.viewId === activeViewId) {
+        queryClient.removeQueries({ queryKey, exact: true });
+      }
+    };
+  }, [queryClient, baseId, tableId, activeViewId, viewQuery, filteringSearchQuery]);
+
+  const {
+    onVisibleRegionChanged,
+    onReset,
+    recordMap,
+    groupPoints,
+    recordsQuery,
+    searchHitIndex,
+    allGroupHeaderRefs,
+  } = useGridAsyncRecords(ssrRecords, undefined, viewQuery, groupPointsServerData ?? undefined);
+
+  const isSelectionLoaded = useIsSelectionLoaded();
 
   const commentCountMap = useCommentCountMap(recordsQuery);
 
-  const onRowOrdered = useGridRowOrder(recordMap);
+  const { onRowOrdered, setDraggingRecordIds } = useGridRowOrder(recordMap);
 
-  const { copy, paste, clear, deleteRecords } = useSelectionOperation({
+  const {
+    copy,
+    paste,
+    clear,
+    deleteRecords,
+    archiveRecords,
+    duplicateRecords,
+    clearProgress,
+    clearSummary,
+    clearErrors,
+    clearProgressStatus,
+    clearDialogMode,
+    clearConfirmRecordCount,
+    isClearProgressOpen,
+    closeClearProgressDialog,
+    confirmClearSelection,
+    deleteProgress,
+    deleteSummary,
+    deleteErrors,
+    deleteProgressStatus,
+    deleteDialogMode,
+    deleteConfirmRecordCount,
+    isDeleteProgressOpen,
+    closeDeleteProgressDialog,
+    confirmDeleteSelection,
+    duplicateProgress,
+    duplicateSummary,
+    duplicateErrors,
+    duplicateProgressStatus,
+    duplicateDialogMode,
+    duplicateConfirmRecordCount,
+    isDuplicateProgressOpen,
+    closeDuplicateProgressDialog,
+    confirmDuplicateSelection,
+    pasteProgress,
+    pasteSummary,
+    pasteErrors,
+    pasteProgressStatus,
+    pasteDialogMode,
+    pasteConfirmRecordCount,
+    isPasteProgressOpen,
+    closePasteProgressDialog,
+    confirmPasteSelection,
+    syncCopy,
+    fill,
+  } = useSelectionOperation({
     collapsedGroupIds: viewQuery?.collapsedGroupIds
       ? Array.from(viewQuery?.collapsedGroupIds)
       : undefined,
   });
+
+  const { copyRecordUrl, viewRecordHistory, addRecordComment } = useContextMenu();
+
+  const {
+    activeCell,
+    presortRecord,
+    presortRecordData,
+    onSelectionChanged,
+    onPresortCellEdited,
+    getPresortCellContent,
+    setPresortRecordData,
+  } = useGridSelection({ recordMap, columns, viewQuery, gridRef });
 
   const {
     localRecord,
     prefillingRowIndex,
     prefillingRowOrder,
     prefillingFieldValueMap,
+    tempRecordId,
     setPrefillingRowIndex,
     setPrefillingRowOrder,
     onPrefillingCellEdited,
@@ -163,16 +392,146 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
     setPrefillingFieldValueMap,
   } = useGridPrefillingRow(columns);
 
-  const { mutate: mutateCreateRecord, isLoading: isCreatingRecord } = useMutation({
-    mutationFn: (records: ICreateRecordsRo['records']) =>
-      createRecords(tableId!, {
+  const inPresorting = presortRecord != null;
+  const inPrefilling = prefillingRowIndex != null;
+
+  const pendingUploadCtx = useMemo(
+    () => ({ tempRecordId, tableId: tableId! }),
+    [tempRecordId, tableId]
+  );
+
+  const onValidation = useCallback(
+    (cell: ICellItem) => {
+      if (!permission['view|update']) return false;
+
+      const [columnIndex] = cell;
+      const field = fields[columnIndex];
+
+      if (!field) return false;
+
+      const { type, isComputed } = field;
+      return type === FieldType.Attachment && !isComputed;
+    },
+    [fields, permission]
+  );
+
+  const startUpload = useCellAttachmentUploadStore((s) => s.startUpload);
+  const onCellDrop = useCallback(
+    (cell: ICellItem, files: FileList) => {
+      const [columnIndex, rowIndex] = cell;
+      const record = recordMap[rowIndex];
+      const field = fields[columnIndex];
+      startUpload(tableId, record.id, field.id, Array.from(files), baseId, shareViewId);
+    },
+    [baseId, shareViewId, fields, recordMap, startUpload, tableId]
+  );
+
+  const startPendingUpload = useCellAttachmentUploadStore((s) => s.startPendingUpload);
+  const onPrefillingCellDrop = useCallback(
+    (cell: ICellItem, fileList: FileList) => {
+      if (!tableId || !tempRecordId) return;
+      const [columnIndex] = cell;
+      const field = fields[columnIndex];
+      if (!field) return;
+      const files = Array.from(fileList);
+      if (!files.length) return;
+
+      startPendingUpload(tableId, tempRecordId, field.id, files, baseId, shareViewId);
+    },
+    [tableId, tempRecordId, fields, baseId, shareViewId, startPendingUpload]
+  );
+
+  const completedPendingByField = useCellAttachmentUploadStore((s) =>
+    tableId ? s.getCompletedPendingAttachments(tableId, tempRecordId) : {}
+  );
+  useEffect(() => {
+    if (!prefillingFieldValueMap) return;
+
+    let changed = false;
+    const next = { ...prefillingFieldValueMap };
+
+    for (const [fieldId, pendingItems] of Object.entries(completedPendingByField)) {
+      const current = (next[fieldId] as IAttachmentItem[] | undefined) ?? [];
+      const ids = new Set(current.map((i) => i.id));
+      const additions = pendingItems.filter((i) => !ids.has(i.id));
+      if (additions.length) {
+        next[fieldId] = [...current, ...additions];
+        changed = true;
+      }
+    }
+
+    if (changed) setPrefillingFieldValueMap(next);
+  }, [completedPendingByField, prefillingFieldValueMap, setPrefillingFieldValueMap]);
+
+  useGridFileEvent({
+    gridRef: inPrefilling ? prefillingGridRef : gridRef,
+    onValidation,
+    onCellDrop: inPrefilling ? onPrefillingCellDrop : onCellDrop,
+  });
+
+  const consumePendingForCreate = useCellAttachmentUploadStore((s) => s.consumePendingForCreate);
+  const promoteToCell = useCellAttachmentUploadStore((s) => s.promoteToCell);
+  const cancelPendingUploads = useCellAttachmentUploadStore((s) => s.cancelPendingUploads);
+  const removePendingCellTasks = useCellAttachmentUploadStore((s) => s.removePendingCellTasks);
+
+  // Clearing/overwriting an attachment cell outside the editor (Delete key, paste)
+  // bypasses the editor onChange, so drop the matching pending upload tasks here.
+  // Otherwise the completed-pending sync effect re-injects them and the create-time
+  // merge re-persists the removed attachments into the new record.
+  const reconcilePendingAttachmentCell = useCallback(
+    (fieldId: string, nextValue: unknown) => {
+      if (!tableId) return;
+      const field = fields.find((f) => f.id === fieldId);
+      if (field?.type !== FieldType.Attachment) return;
+      const keepIds = new Set(
+        ((nextValue as IAttachmentItem[] | null | undefined) ?? []).map((item) => item.id)
+      );
+      removePendingCellTasks(tableId, tempRecordId, fieldId, keepIds);
+    },
+    [fields, removePendingCellTasks, tableId, tempRecordId]
+  );
+
+  const { mutate: mutateCreateRecord, isPending: isCreatingRecord } = useMutation({
+    mutationFn: async (records: ICreateRecordsRo['records']) => {
+      // Safety net: merge any pending-completed attachments not yet consumed by onChange
+      if (records.length === 1 && tableId && tempRecordId) {
+        const { mergedFields, consumedTaskIdsByCellKey } = mergePendingAttachmentsForCreate({
+          fields: records[0].fields,
+          tableId,
+          tempRecordId,
+          consumePendingForCreate,
+        });
+        records = [{ ...records[0], fields: mergedFields }];
+
+        const result = await createRecords(tableId!, {
+          records,
+          fieldKeyType: FieldKeyType.Id,
+          order:
+            activeViewId && prefillingRowOrder
+              ? { ...prefillingRowOrder, viewId: activeViewId }
+              : undefined,
+        });
+
+        finalizePendingUploadAfterCreate({
+          tableId,
+          tempRecordId,
+          realRecordId: result.data.records[0]?.id,
+          consumedTaskIdsByCellKey,
+          promoteToCell,
+        });
+
+        return result;
+      }
+
+      return createRecords(tableId!, {
         records,
         fieldKeyType: FieldKeyType.Id,
         order:
           activeViewId && prefillingRowOrder
             ? { ...prefillingRowOrder, viewId: activeViewId }
             : undefined,
-      }),
+      });
+    },
     onSuccess: () => {
       resetNewRecords();
     },
@@ -184,7 +543,13 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
     setNewRecords(undefined);
   };
 
-  const inPrefilling = prefillingRowIndex != null;
+  useEffect(() => {
+    setRecordMap(recordMap);
+  }, [recordMap, setRecordMap]);
+
+  useEffect(() => {
+    setFields(fields);
+  }, [fields, setFields]);
 
   useEffect(() => {
     if (preTableId && preTableId !== tableId) {
@@ -192,20 +557,25 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
     }
   }, [onReset, tableId, preTableId]);
 
+  const expandedRecordId = router.query.recordId as string | undefined;
   useEffect(() => {
-    const recordIds = Object.keys(recordMap)
-      .sort((a, b) => Number(a) - Number(b))
-      .map((key) => recordMap[key]?.id)
-      .filter(Boolean);
+    if (!expandedRecordId) {
+      expandRecordRef.current?.updateRecordIds?.(undefined);
+      return;
+    }
+
+    const recordIds = Object.entries(recordMap)
+      .filter(([index]) => Number(index) < realRowCount)
+      .sort(([a], [b]) => Number(a) - Number(b))
+      .map(([, record]) => record.id);
     expandRecordRef.current?.updateRecordIds?.(recordIds);
-  }, [recordMap]);
+  }, [recordMap, expandedRecordId, realRowCount]);
 
   // The recordId on the route changes, and the activeCell needs to change with it
   useEffect(() => {
-    const recordId = router.query.recordId as string;
-    if (recordId) {
+    if (expandedRecordId) {
       const recordIndex = Number(
-        Object.keys(recordMap).find((key) => recordMap[key]?.id === recordId)
+        Object.keys(recordMap).find((key) => recordMap[key]?.id === expandedRecordId)
       );
 
       recordIndex >= 0 &&
@@ -216,7 +586,7 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
           ])
         );
     }
-  }, [router.query.recordId, recordMap]);
+  }, [expandedRecordId, recordMap]);
 
   const getCellContent = useCallback<(cell: ICellItem) => ICell>(
     (cell) => {
@@ -225,13 +595,17 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
       if (record !== undefined) {
         const fieldId = columns[colIndex]?.id;
         if (!fieldId) return { type: CellType.Loading };
-        return cellValue2GridDisplay(record, colIndex, false, (tableId, recordId) =>
-          setExpandRecord({ tableId, recordId })
+        return cellValue2GridDisplay(
+          record,
+          colIndex,
+          false,
+          (tableId, recordId) => setExpandRecord({ tableId, recordId }),
+          buttonClickStatusHook
         );
       }
       return { type: CellType.Loading };
     },
-    [recordMap, columns, cellValue2GridDisplay]
+    [recordMap, columns, cellValue2GridDisplay, buttonClickStatusHook]
   );
 
   const onCellEdited = useCallback(
@@ -257,11 +631,18 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
       }
       const oldCellValue = record.getCellValue(fieldId) ?? null;
       if (isEqual(newCellValue, oldCellValue)) return;
-      record.updateCell(fieldId, newCellValue);
+      record.updateCell(fieldId, newCellValue, { t, prefix: 'sdk' });
       return record;
     },
-    [recordMap, columns]
+    [recordMap, columns, t]
   );
+
+  const { confirm } = useConfirm();
+
+  // Handle auto-fill click from menu
+  const handleAutoFillClick = (fieldId: string) => {
+    aiAutoFillDialogRef.current?.open(fieldId);
+  };
 
   // eslint-disable-next-line sonarjs/cognitive-complexity
   const onContextMenu = (selection: CombinedSelection, position: IPosition) => {
@@ -277,19 +658,61 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
         .filter(Boolean);
     }
 
+    const confirmAndArchiveRecords = async (recordCount: number) => {
+      const confirmed = await confirm({
+        title: t('table:table.actionTips.archiveRecordConfirmTitle'),
+        description: t('table:table.actionTips.archiveRecordConfirmDescription', {
+          recordCount,
+        }),
+        confirmText: t('table:table.actionTips.archiveRecord'),
+        cancelText: t('common:actions.cancel'),
+      });
+      if (!confirmed) return;
+
+      await archiveRecords(selection, recordMap);
+      gridRef.current?.setSelection(emptySelection);
+    };
+
     if (isCellSelection || isRowSelection) {
       const rowStart = isCellSelection ? ranges[0][1] : ranges[0][0];
       const rowEnd = isCellSelection ? ranges[1][1] : ranges[0][1];
+      const isSingleCell = isCellSelection && ranges[0][0] === ranges[1][0] && rowStart === rowEnd;
+      const isMultiCellSelection = isCellSelection && !isSingleCell;
       const isMultipleSelected =
         (isRowSelection && ranges.length > 1) || Math.abs(rowEnd - rowStart) > 0;
 
-      if (isMultipleSelected) {
+      const addToChat = baseId
+        ? () => cacheSelectionForChat(queryClient, baseId, selection, true)
+        : undefined;
+
+      if (isMultipleSelected || isMultiCellSelection) {
         openRecordMenu({
           position,
-          isMultipleSelected,
-          deleteRecords: async (selection) => {
-            deleteRecords(selection);
+          isMultipleSelected: isMultipleSelected || isMultiCellSelection,
+          addToChat,
+          deleteRecords: async () => {
+            const deleteRows = getEffectRows(selection, realRowCount);
+            const usesStreamDeleteDialog = shouldUseDeleteSelectionStream(selection, realRowCount);
+
+            if (!usesStreamDeleteDialog && deleteRows >= 10) {
+              const confirmed = await confirm({
+                title: t('table:table.actionTips.deleteRecordConfirmTitle'),
+                description: t('table:table.actionTips.deleteRecordConfirmDescription', {
+                  recordCount: deleteRows,
+                }),
+                confirmText: t('table:table.actionTips.deleteRecord'),
+                cancelText: t('common:actions.cancel'),
+                confirmButtonVariant: 'destructive',
+              });
+              if (!confirmed) return;
+            }
+
+            deleteRecords(selection, recordMap);
             gridRef.current?.setSelection(emptySelection);
+          },
+          archiveRecords: () => confirmAndArchiveRecords(getEffectRows(selection, realRowCount)),
+          duplicateRecord: async () => {
+            await duplicateRecords(selection);
           },
         });
       } else {
@@ -302,22 +725,43 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
           position,
           record,
           neighborRecords,
-          insertRecord: (anchorId, position) => {
+          addToChat,
+
+          insertRecord: (anchorId, position, num: number) => {
             if (!tableId || !view?.id || !record) return;
             const targetIndex = position === 'before' ? rowStart - 1 : rowStart;
-            const fieldValueMap =
-              group?.reduce(
-                (prev, { fieldId }) => {
-                  prev[fieldId] = record.getCellValue(fieldId);
-                  return prev;
-                },
-                {} as { [key: string]: unknown }
-              ) ?? {};
-            generateRecord(fieldValueMap, Math.max(targetIndex, 0), { anchorId, position });
+            generateRecord(
+              getGroupFieldValueMap(rowStart),
+              Math.max(targetIndex, 0),
+              { anchorId, position },
+              num
+            );
           },
-          deleteRecords: async (selection) => {
-            deleteRecords(selection);
+          duplicateRecord: async () => {
+            if (!record || !activeViewId) return;
+            await duplicateRecord({
+              tableId,
+              recordId: record.id,
+              order: {
+                viewId: activeViewId,
+                anchorId: record.id,
+                position: 'after',
+              },
+            });
+          },
+          deleteRecords: async () => {
+            deleteRecords(selection, recordMap);
             gridRef.current?.setSelection(emptySelection);
+          },
+          archiveRecords: () => confirmAndArchiveRecords(1),
+          copyRecordUrl: async () => {
+            await copyRecordUrl(record?.id);
+          },
+          viewRecordHistory: async () => {
+            await viewRecordHistory(record?.id);
+          },
+          addRecordComment: async () => {
+            await addRecordComment(record?.id);
           },
           isMultipleSelected: false,
         });
@@ -329,9 +773,37 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
       const selectColumns = extract(start, end, columns);
       const indexedColumns = keyBy(selectColumns, 'id');
       const selectFields = fields.filter((field) => indexedColumns[field.id]);
+      const onAutoFill = (fieldId: string) => handleAutoFillClick(fieldId);
       const onSelectionClear = () => gridRef.current?.setSelection(emptySelection);
-      openHeaderMenu({ position, fields: selectFields, onSelectionClear });
+      const freezeColumnState = gridRef.current?.getFreezeColumnState();
+      openHeaderMenu({
+        position,
+        fields: selectFields,
+        aiEnable: fieldAIEnable,
+        freezeColumnIndex: start === end ? start : undefined,
+        maxFreezeColumnCount: freezeColumnState?.maxFreezeColumnCount,
+        onSelectionClear,
+        onAutoFill,
+        addToChat: () => {
+          if (!baseId || !selectFields.length) return;
+          cacheColumnSelectionForChat(
+            queryClient,
+            baseId,
+            Math.min(start, end),
+            Math.max(start, end),
+            selectColumns.map((column) => column.name)
+          );
+        },
+      });
     }
+  };
+
+  const onGroupHeaderContextMenu = (groupId: string, position: IPosition) => {
+    openGroupHeaderMenu({
+      groupId,
+      position,
+      allGroupHeaderRefs,
+    });
   };
 
   const onColumnHeaderMenuClick = useCallback(
@@ -339,23 +811,38 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
       const fieldId = columns[colIndex].id;
       const { x, height } = bounds;
       const selectedFields = fields.filter((field) => field.id === fieldId);
-      openHeaderMenu({ fields: selectedFields, position: { x, y: height } });
+      const onAutoFill = (fieldId: string) => handleAutoFillClick(fieldId);
+      const freezeColumnState = gridRef.current?.getFreezeColumnState();
+      openHeaderMenu({
+        fields: selectedFields,
+        position: { x, y: height },
+        aiEnable: fieldAIEnable,
+        freezeColumnIndex: colIndex,
+        maxFreezeColumnCount: freezeColumnState?.maxFreezeColumnCount,
+        onAutoFill,
+        addToChat: () => {
+          if (!baseId) return;
+          cacheColumnSelectionForChat(queryClient, baseId, colIndex, colIndex, [
+            columns[colIndex].name,
+          ]);
+        },
+      });
     },
-    [columns, fields, openHeaderMenu]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [columns, fields, fieldAIEnable, openHeaderMenu, baseId, queryClient]
   );
 
   const onColumnHeaderDblClick = useCallback(
     (colIndex: number) => {
       if (!columns[colIndex]) return;
       const fieldId = columns[colIndex].id;
-      const selectedFields = fields.find((field) => field.id === fieldId);
-      if (!selectedFields || !fieldEditable(selectedFields)) {
+      if (!fieldEditable) {
         return;
       }
       gridRef.current?.setSelection(emptySelection);
       openSetting({ fieldId, operator: FieldOperator.Edit });
     },
-    [columns, fields, fieldEditable, openSetting]
+    [columns, fieldEditable, openSetting]
   );
 
   const onColumnHeaderClick = useCallback(
@@ -364,7 +851,13 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
       const fieldId = columns[colIndex].id;
       const { x, height } = bounds;
       const selectedFields = fields.filter((field) => field.id === fieldId);
-      openHeaderMenu({ fields: selectedFields, position: { x, y: height } });
+      const freezeColumnState = gridRef.current?.getFreezeColumnState();
+      openHeaderMenu({
+        fields: selectedFields,
+        position: { x, y: height },
+        freezeColumnIndex: colIndex,
+        maxFreezeColumnCount: freezeColumnState?.maxFreezeColumnCount,
+      });
     },
     [isTouchDevice, columns, fields, openHeaderMenu]
   );
@@ -380,48 +873,114 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
 
   const onColumnFreeze = useCallback(
     (count: number) => {
-      view?.updateFrozenColumnCount(count);
+      if (count <= 0) return;
+      const anchorId = columns[Math.max(0, count - 1)]?.id;
+      if (!view || !anchorId) return;
+      view.updateOption({ frozenFieldId: anchorId });
     },
-    [view]
+    [view, columns]
   );
 
-  const generateRecord = (
+  const onColumnFreezeFailed = useCallback(() => {
+    toast.warning(t('table:menu.freezeFieldWindowTooNarrow'));
+  }, [t]);
+
+  const filterCreateFieldValues = useCallback(
+    (
+      fieldMap: { [fieldId: string]: { canCreateFieldRecord?: boolean } },
+      fieldValueMap: { [fieldId: string]: unknown }
+    ) => {
+      return Object.entries(fieldValueMap).reduce(
+        (prev, [fieldId, value]) => {
+          if (fieldMap[fieldId]?.canCreateFieldRecord === false) {
+            return prev;
+          }
+          prev[fieldId] = value;
+          return prev;
+        },
+        {} as { [fieldId: string]: unknown }
+      );
+    },
+    []
+  );
+
+  // group-field prefill for a record created at rowIndex. The neighbor
+  // record's cell value is exact, but the record subscription is projected to
+  // visible fields — for a hidden group field (or an unloaded neighbor) fall
+  // back to the group header value from the server-computed group points
+  const getGroupFieldValueMap = (rowIndex: number) => {
+    if (!group?.length) return {};
+    const record = recordMap[rowIndex];
+    const groupValues = getGroupValuesByRowIndex(groupPoints, rowIndex);
+    // the backend builds group points from the permission-readable group
+    // fields only, so the header value chain must be indexed against the
+    // same filtered list; unreadable group fields are skipped, not prefilled
+    const fieldMap = keyBy(allFields, 'id');
+    const readableGroup = group.filter(({ fieldId }) => fieldMap[fieldId]);
+    return readableGroup.reduce(
+      (prev, { fieldId }, depth) => {
+        const cellValue = record?.getCellValue(fieldId);
+        const value = cellValue === undefined ? groupValues?.[depth] : cellValue;
+        if (value !== undefined) {
+          prev[fieldId] = value;
+        }
+        return prev;
+      },
+      {} as { [fieldId: string]: unknown }
+    );
+  };
+
+  const generateRecord = async (
     fieldValueMap: { [fieldId: string]: unknown },
     targetIndex?: number,
-    rowOrder?: IUpdateOrderRo
+    rowOrder?: IUpdateOrderRo,
+    num?: number
   ) => {
     const index = targetIndex ?? Math.max(realRowCount - 1, 0);
-    setPrefillingFieldValueMap(fieldValueMap);
+    if (num === 0) {
+      return;
+    }
     setPrefillingRowOrder(rowOrder);
-    setPrefillingRowIndex(index);
-    setSelection(emptySelection);
-    gridRef.current?.setSelection(emptySelection);
-    setTimeout(() => {
-      prefillingGridRef.current?.setSelection(
-        new CombinedSelection(SelectionRegionType.Cells, [
-          [0, 0],
-          [0, 0],
-        ])
-      );
-    });
+
+    const filter = view?.filter;
+    const fieldMap = keyBy(allFields, 'id');
+
+    if (num === 1 || num === undefined) {
+      setPrefillingFieldValueMap(filterCreateFieldValues(fieldMap, fieldValueMap));
+      setPrefillingRowIndex(index);
+      setSelection(emptySelection);
+      gridRef.current?.setSelection(emptySelection);
+      setTimeout(() => {
+        prefillingGridRef.current?.setSelection(
+          new CombinedSelection(SelectionRegionType.Cells, [
+            [0, 0],
+            [0, 0],
+          ])
+        );
+      });
+    } else {
+      const filterValueMap = await extractDefaultFieldsFromFilters({
+        filter,
+        fieldMap,
+        currentUserId: user.id,
+      });
+      const filteredCreateFieldValueMap = filterCreateFieldValues(fieldMap, {
+        ...fieldValueMap,
+        ...filterValueMap,
+      });
+      // insert empty records
+      const emptyRecords = Array.from({ length: num }).fill({
+        fields: filteredCreateFieldValueMap,
+      }) as ICreateRecordsRo['records'];
+      mutateCreateRecord(emptyRecords);
+    }
   };
 
   const onRowAppend = (targetIndex?: number) => {
-    if (group?.length && targetIndex != null) {
-      const record = recordMap[targetIndex];
-
-      if (record == null) return generateRecord({}, targetIndex);
-
-      const fieldValueMap = group.reduce(
-        (prev, { fieldId }) => {
-          prev[fieldId] = record.getCellValue(fieldId);
-          return prev;
-        },
-        {} as { [key: string]: unknown }
-      );
-      return generateRecord(fieldValueMap, targetIndex);
-    }
-    return generateRecord({}, targetIndex);
+    return generateRecord(
+      targetIndex != null ? getGroupFieldValueMap(targetIndex) : {},
+      targetIndex
+    );
   };
 
   const onColumnAppend = () => {
@@ -431,11 +990,6 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
   };
 
   const customIcons = useGridIcons();
-
-  const rowHeight = useMemo(() => {
-    if (view == null) return GIRD_ROW_HEIGHT_DEFINITIONS[RowHeightLevel.Short];
-    return GIRD_ROW_HEIGHT_DEFINITIONS[view.options?.rowHeight || RowHeightLevel.Short];
-  }, [view]);
 
   const rowControls = useMemo(() => {
     if (isTouchDevice) return [];
@@ -461,19 +1015,90 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
   }, [isTouchDevice, permission]);
 
   const onDelete = (selection: CombinedSelection) => {
-    clear(selection);
+    clear(selection, recordMap);
   };
 
-  const onCopy = async (selection: CombinedSelection) => {
-    copy(selection);
+  const selectionIncludesCrossBaseField = useCallback(
+    (selection: CombinedSelection) => {
+      if (!baseId) return false;
+      switch (selection.type) {
+        case SelectionRegionType.Cells: {
+          const [[startCol], [endCol]] = selection.serialize();
+          return fields.slice(startCol, endCol + 1).some((f) => isCrossBaseField(f, baseId));
+        }
+        case SelectionRegionType.Columns: {
+          return selection
+            .serialize()
+            .some(([s, e]) => fields.slice(s, e + 1).some((f) => isCrossBaseField(f, baseId)));
+        }
+        case SelectionRegionType.Rows:
+          return fields.some((f) => isCrossBaseField(f, baseId));
+        default:
+          return false;
+      }
+    },
+    [baseId, fields]
+  );
+
+  const onCopy = async (selection: CombinedSelection, e: React.ClipboardEvent) => {
+    // In share context, use shareAllowCopy; otherwise use permission
+    const canCopy = shareId ? shareAllowCopy : permission['record|copy'];
+    if (!canCopy) {
+      sonnerToast.warning(t('table:table.actionTips.copyError.noPermission'));
+      return;
+    }
+
+    // Share view guard: cross-base link fields would otherwise leak foreign-base
+    // record IDs through the clipboard. Confirm and downgrade them to plain text
+    // before the payload leaves the page.
+    if (shareId && baseId && selectionIncludesCrossBaseField(selection)) {
+      e.preventDefault();
+      if (!isSelectionLoaded({ selection, recordMap, rowCount: realRowCount })) {
+        sonnerToast.warning(t('table:table.actionTips.crossBaseCopyLoadFirst'));
+        return;
+      }
+      const confirmed = await confirm({
+        title: t('table:table.actionTips.crossBaseCopyTitle'),
+        description: t('table:table.actionTips.crossBaseCopyDescription'),
+        confirmText: t('table:table.actionTips.crossBaseCopyConfirm'),
+        cancelText: t('common:actions.cancel'),
+      });
+      if (!confirmed) return;
+
+      await copy(selection, async () => {
+        const { content, headers } = getSyncCopyData({
+          recordMap,
+          fields,
+          selection,
+          rowCount: realRowCount,
+        });
+        return { content, header: downgradeCrossBaseHeaders(headers, baseId).headers };
+      });
+      return;
+    }
+
+    if (baseId && !isSingleCellSelection(selection)) {
+      cacheSelectionForChat(queryClient, baseId, selection, false);
+    }
+
+    if (isSelectionLoaded({ selection, recordMap, rowCount: realRowCount })) {
+      // sync copy
+      syncCopy(e, { selection, recordMap, rowCount: realRowCount });
+      return;
+    }
+    copy(selection, undefined, recordMap);
   };
 
-  const onCopyForPrefilling = async (selection: CombinedSelection) => {
+  const onCopyForSingleRow = async (
+    e: React.ClipboardEvent,
+    selection: CombinedSelection,
+    fieldValueMap?: { [fieldId: string]: unknown }
+  ) => {
     const { type } = selection;
 
-    if (type !== SelectionRegionType.Cells || prefillingFieldValueMap == null) return;
+    if (type !== SelectionRegionType.Cells || fieldValueMap == null) return;
 
-    const getCopyData = async () => {
+    const getCopyData = () => {
       const [start, end] = selection.serialize();
       const selectedFields = fields.slice(start[0], end[0] + 1);
       const filteredPropsFields = selectedFields
@@ -483,26 +1108,24 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
         })
         .filter(Boolean) as IFieldVo[];
       const content = [
-        selectedFields.map((field) =>
-          field.cellValue2String(prefillingFieldValueMap[field.id] as never)
-        ),
+        selectedFields.map((field) => field.cellValue2String(fieldValueMap[field.id] as never)),
       ];
       return { content: stringifyClipboardText(content), header: filteredPropsFields };
     };
 
-    copy(selection, getCopyData);
+    syncCopy(e, { getCopyData });
   };
 
-  const onPaste = (selection: CombinedSelection, e: React.ClipboardEvent) => {
+  const onPaste = async (selection: CombinedSelection, e: React.ClipboardEvent) => {
     if (!permission['record|update']) {
-      return toast({ title: 'Unable to paste' });
+      return toast.warning('Unable to paste');
     }
-    paste(e, selection, recordMap);
+    await paste(e, selection, recordMap);
   };
 
   const onPasteForPrefilling = (selection: CombinedSelection, e: React.ClipboardEvent) => {
     if (!permission['record|update'] || localRecord == null) {
-      return toast({ title: 'Unable to paste' });
+      return toast.warning('Unable to paste');
     }
     paste(e, selection, { 0: localRecord }, (records) => {
       if (records.length > 1) {
@@ -510,16 +1133,74 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
         setNewRecords(records);
         return;
       }
+      Object.entries(records[0].fields).forEach(([fieldId, value]) =>
+        reconcilePendingAttachmentCell(fieldId, value)
+      );
       setPrefillingFieldValueMap({ ...prefillingFieldValueMap, ...records[0].fields });
     });
   };
 
-  const onSelectionChanged = useCallback(
-    (selection: CombinedSelection) => {
-      setSelection(selection);
-    },
-    [setSelection]
-  );
+  const onPasteForPresort = (selection: CombinedSelection, e: React.ClipboardEvent) => {
+    if (!presortRecord) return;
+    if (!permission['record|update']) {
+      return toast.warning('Unable to paste');
+    }
+    paste(e, selection, { 0: presortRecord }, (records) => {
+      updateRecord({
+        tableId,
+        recordId: presortRecord.id,
+        recordRo: {
+          fieldKeyType: FieldKeyType.Id,
+          record: {
+            fields: { ...presortRecord.fields, ...records[0].fields },
+          },
+        },
+      });
+    });
+  };
+
+  const onDeleteForPrefilling = (selection: CombinedSelection) => {
+    if (localRecord == null || prefillingFieldValueMap == null) return;
+
+    const [start, end] = selection.serialize();
+    const startCol = Math.min(start[0], end[0]);
+    const endCol = Math.max(start[0], end[0]);
+
+    const updated: { [fieldId: string]: unknown } = { ...prefillingFieldValueMap };
+    for (let col = startCol; col <= endCol; col++) {
+      const fieldId = columns[col]?.id;
+      if (!fieldId) continue;
+      updated[fieldId] = null;
+      reconcilePendingAttachmentCell(fieldId, null);
+    }
+    setPrefillingFieldValueMap(updated);
+  };
+
+  const onDeleteForPresort = (selection: CombinedSelection) => {
+    if (!presortRecord) return;
+
+    const [start, end] = selection.serialize();
+    const startCol = Math.min(start[0], end[0]);
+    const endCol = Math.max(start[0], end[0]);
+
+    const fieldsToNull: { [fieldId: string]: unknown } = {};
+    for (let col = startCol; col <= endCol; col++) {
+      const fieldId = columns[col]?.id;
+      if (!fieldId) continue;
+      fieldsToNull[fieldId] = null;
+    }
+
+    updateRecord({
+      tableId,
+      recordId: presortRecord.id,
+      recordRo: {
+        fieldKeyType: FieldKeyType.Id,
+        record: {
+          fields: { ...presortRecord.fields, ...fieldsToNull },
+        },
+      },
+    });
+  };
 
   const collaborators = useCollaborate(selection, getCellContent);
 
@@ -557,13 +1238,108 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
     }
   };
 
+  const onFillSelection = (selectionRanges: [IRange, IRange], targetEndRealRowIndex: number) => {
+    const [start, end] = selectionRanges;
+    const startCol = Math.min(start[0], end[0]);
+    const endCol = Math.max(start[0], end[0]);
+    const topRow = Math.min(start[1], end[1]);
+    const bottomRow = Math.max(start[1], end[1]);
+    if (!tableId) return;
+    const isDownward = targetEndRealRowIndex > bottomRow;
+    const isUpward = targetEndRealRowIndex < topRow;
+    if (!isDownward && !isUpward) return;
+
+    const selectionForCopy = new CombinedSelection(SelectionRegionType.Cells, [start, end]);
+    const { headers, rawContent } = getSyncCopyData({
+      recordMap,
+      fields,
+      selection: selectionForCopy,
+      rowCount: realRowCount,
+    });
+
+    const fillPayload = buildFillSelectionPaste({
+      selectionRanges,
+      targetEndRealRowIndex,
+      rawContent,
+      headers,
+      fields: fields.slice(startCol, endCol + 1),
+    });
+
+    if (fillPayload) {
+      const [[targetStartCol, targetStartRow], [targetEndCol, targetEndRow]] = fillPayload.ranges;
+      const targetRecordIds: string[] = [];
+      for (let rowIndex = targetStartRow; rowIndex <= targetEndRow; rowIndex += 1) {
+        const recordId = recordMap[rowIndex]?.id;
+        if (recordId) {
+          targetRecordIds.push(recordId);
+          continue;
+        }
+        if (rowIndex < realRowCount) {
+          toast.error(t('table:table.actionTips.fillFailed'));
+          return;
+        }
+      }
+      const targetFieldIds = fields
+        .slice(targetStartCol, targetEndCol + 1)
+        .map((field) => field.id);
+
+      fill({
+        content: fillPayload.content,
+        header: fillPayload.header,
+        selection: {
+          recordIds: targetRecordIds,
+          fieldIds: targetFieldIds,
+        },
+      });
+    }
+  };
+
   const componentId = useMemo(() => uniqueId('grid-view-'), []);
 
-  const onItemHovered = (type: RegionType, bounds: IRectangle, cellItem: ICellItem) => {
+  const onCellValueHovered = (bounds: IRectangle, cellItem: ICellItem, data?: unknown) => {
+    const cellInfo = getCellContent(cellItem);
+    if (!cellInfo?.id) {
+      return;
+    }
+
+    if (cellInfo.type === CellType.Button) {
+      const { data } = cellInfo as IButtonCell;
+      const { fieldOptions, cellValue } = data;
+      const { label } = fieldOptions;
+      const count = cellValue?.count ?? 0;
+      const maxCount = fieldOptions?.maxCount ?? 0;
+      openTooltip({
+        id: componentId,
+        text: t('sdk:common.clickedCount', {
+          label,
+          text: maxCount > 0 ? `${count}/${maxCount}` : `${count}`,
+        }),
+        position: bounds,
+      });
+    }
+
+    const userData = (data as { user?: IUserData } | undefined)?.user;
+    if (cellInfo.type === CellType.User && userData) {
+      openUserPopover({
+        id: componentId,
+        user: userData,
+        position: bounds,
+      });
+    }
+  };
+
+  const onItemHovered = (
+    type: RegionType,
+    bounds: IRectangle,
+    cellItem: ICellItem,
+    data?: unknown
+  ) => {
     const [columnIndex] = cellItem;
-    const { description } = columns[columnIndex] ?? {};
+    const { description, icon } = columns[columnIndex] ?? {};
 
     closeTooltip();
+    closeUserPopover();
+    calculationTooltipOpenRef.current = false;
 
     if (type === RegionType.ColumnDescription && description) {
       openTooltip({
@@ -573,12 +1349,14 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
       });
     }
 
-    if (type === RegionType.ColumnPrimaryIcon) {
+    const columnIconTooltip = getColumnIconTooltip(type, icon, t('sdk:hidden.primaryKey'));
+    if (columnIconTooltip) {
       openTooltip({
         id: componentId,
-        text: t('sdk:hidden.primaryKey'),
+        text: columnIconTooltip,
         position: bounds,
       });
+      calculationTooltipOpenRef.current = type === RegionType.ColumnIcon;
     }
 
     if (type === RegionType.RowHeaderDragHandler && isAutoSort) {
@@ -598,7 +1376,11 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
       const hoverCollaborators = groupedCollaborators?.[cellInfo.id]?.sort(
         (a, b) => a.timeStamp - b.timeStamp
       );
-      const collaboratorText = hoverCollaborators?.map((cur) => cur.user.name).join('、');
+      const collaboratorText = hoverCollaborators
+        ? new Intl.ListFormat(i18n.language, { style: 'narrow', type: 'conjunction' }).format(
+            hoverCollaborators.map((cur) => cur.user.name)
+          )
+        : undefined;
 
       const hoverHeight = 24;
 
@@ -631,12 +1413,26 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
           },
         });
     }
+
+    if (type === RegionType.CellValue) {
+      onCellValueHovered(bounds, cellItem, data);
+    }
   };
 
   const draggable = useMemo(() => {
     if (isAutoSort) return DraggableType.Column;
     return DraggableType.All;
   }, [isAutoSort]);
+
+  const onDragStart = useCallback(
+    (type: DragRegionType, dragIndexs: number[]) => {
+      if (type === DragRegionType.Rows) {
+        const recordIds = dragIndexs.map((index) => recordMap[index]?.id).filter(Boolean);
+        setDraggingRecordIds(recordIds);
+      }
+    },
+    [recordMap, setDraggingRecordIds]
+  );
 
   const getAuthorizedFunction = useCallback(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -651,6 +1447,8 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
 
   const onGridScrollChanged = useCallback((sl?: number, _st?: number) => {
     prefillingGridRef.current?.scrollTo(sl, undefined);
+    aiGenerateButtonRef.current?.onScrollHandler();
+    resetClickCountButtonRef.current?.onScrollHandler();
   }, []);
 
   const onPrefillingGridScrollChanged = useCallback((sl?: number, _st?: number) => {
@@ -658,11 +1456,11 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
   }, []);
 
   const prefillingRowStyle = useMemo(() => {
-    const defaultTop = rowHeight / 2;
+    const defaultTop = rowHeight;
     const height = rowHeight + 5;
 
     if (gridRef.current == null || prefillingRowIndex == null) {
-      return { top: defaultTop, height };
+      return { top: 0, height };
     }
 
     return {
@@ -674,12 +1472,30 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
     };
   }, [rowHeight, prefillingRowIndex]);
 
+  const presortRowStyle = useMemo(() => {
+    const height = rowHeight + 5;
+    const rowIndex = presortRecordData?.rowIndex;
+
+    if (gridRef.current == null || rowIndex == null) {
+      return { top: 0, height };
+    }
+
+    return {
+      top: Math.max(
+        gridRef.current.getRowOffset(rowIndex),
+        GIRD_ROW_HEIGHT_DEFINITIONS[RowHeightLevel.Short]
+      ),
+      height,
+    };
+  }, [rowHeight, presortRecordData]);
+
   useEffect(() => {
-    if (!inPrefilling) return;
+    if (!inPrefilling && !inPresorting) return;
     const scrollState = gridRef.current?.getScrollState();
     if (scrollState == null) return;
+    presortGridRef.current?.scrollTo(scrollState.scrollLeft, undefined);
     prefillingGridRef.current?.scrollTo(scrollState.scrollLeft, undefined);
-  }, [inPrefilling]);
+  }, [inPrefilling, inPresorting]);
 
   useClickAway(containerRef, () => {
     gridRef.current?.resetState();
@@ -697,16 +1513,182 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
     }
   );
 
+  useEffect(() => setGridRef?.(gridRef), [setGridRef]);
+
+  useEffect(() => {
+    const recordId2IndexMap: { [id: string]: number } = {};
+    Object.entries(recordMap).forEach(([index, record]) => {
+      if (record == null) return;
+      recordId2IndexMap[record.id] = index as unknown as number;
+    });
+    const fieldId2IndexMap: { [id: string]: number } = {};
+    fields.forEach(({ id }, index) => (fieldId2IndexMap[id] = index));
+    const loadingCells = taskStatusCells
+      ?.filter(
+        ({ recordId, fieldId }) =>
+          recordId2IndexMap[recordId] != null && fieldId2IndexMap[fieldId] != null
+      )
+      .map(({ recordId, fieldId }) => [fieldId2IndexMap[fieldId], recordId2IndexMap[recordId]]);
+    gridRef.current?.setCellLoading((loadingCells ?? []) as ICellItem[]);
+  }, [fields, recordMap, taskStatusCells]);
+
+  useEffect(() => {
+    const fieldId2IndexMap: { [id: string]: number } = {};
+    fields.forEach(({ id }, index) => (fieldId2IndexMap[id] = index));
+    const loadingColumnIndexs = Object.keys(taskStatusFieldMap ?? {}).map((fieldId) => {
+      const index = fieldId2IndexMap[fieldId];
+      const { completedCount = 0, totalCount } = taskStatusFieldMap?.[fieldId] ?? {};
+      return {
+        index,
+        progress: totalCount ? completedCount / totalCount : 0,
+        onCancel: () => {
+          stopFillField(tableId, fieldId);
+        },
+      };
+    });
+    gridRef.current?.setColumnLoadings(loadingColumnIndexs);
+  }, [tableId, fields, taskStatusFieldMap]);
+
+  // Helper to clear cell error by recordId and fieldId
+  const clearCellError = useCallback(
+    (recordId: string, fieldId: string) => {
+      const recordId2IndexMap: { [id: string]: number } = {};
+      Object.entries(recordMap).forEach(([index, record]) => {
+        if (record == null) return;
+        recordId2IndexMap[record.id] = index as unknown as number;
+      });
+
+      const fieldId2IndexMap: { [id: string]: number } = {};
+      fields.forEach(({ id }, index) => (fieldId2IndexMap[id] = index));
+
+      const fieldIndex = fieldId2IndexMap[fieldId];
+      const recordIndex = recordId2IndexMap[recordId];
+
+      if (fieldIndex === undefined || recordIndex === undefined) return;
+
+      setCellErrors((current) =>
+        current.filter((e) => !(e.cellItem[0] === fieldIndex && e.cellItem[1] === recordIndex))
+      );
+    },
+    [fields, recordMap]
+  );
+
+  // Handle taskProcessing events - clear any existing error for this cell
+  const handleTaskProcessing = useCallback(
+    (_actionKey: string, payload?: { recordId: string; fieldId: string }) => {
+      if (!payload) return;
+      const { recordId, fieldId } = payload;
+      clearCellError(recordId, fieldId);
+    },
+    [clearCellError]
+  );
+
+  // Handle taskFailed events from AI field generation
+  const handleTaskFailed = useCallback(
+    (_actionKey: string, payload?: { recordId: string; fieldId: string; errorMsg: string }) => {
+      if (!payload) return;
+      const { recordId, fieldId, errorMsg } = payload;
+
+      // Build index maps (same as loading state)
+      const recordId2IndexMap: { [id: string]: number } = {};
+      Object.entries(recordMap).forEach(([index, record]) => {
+        if (record == null) return;
+        recordId2IndexMap[record.id] = index as unknown as number;
+      });
+
+      const fieldId2IndexMap: { [id: string]: number } = {};
+      fields.forEach(({ id }, index) => (fieldId2IndexMap[id] = index));
+
+      const fieldIndex = fieldId2IndexMap[fieldId];
+      const recordIndex = recordId2IndexMap[recordId];
+
+      // Skip if field or record not found in current view
+      if (fieldIndex === undefined || recordIndex === undefined) {
+        return;
+      }
+
+      setCellErrors((prev) => {
+        // Check if error already exists for this cell
+        const existingIndex = prev.findIndex(
+          (e) => e.cellItem[0] === fieldIndex && e.cellItem[1] === recordIndex
+        );
+
+        const newError: ICellError = {
+          cellItem: [fieldIndex, recordIndex],
+          errorMsg,
+          onRetry: () => {
+            // Clear error and trigger retry
+            clearCellError(recordId, fieldId);
+            autoFillCell(tableId, recordId, fieldId);
+          },
+          onDismiss: () => {
+            clearCellError(recordId, fieldId);
+          },
+        };
+
+        if (existingIndex >= 0) {
+          const updated = [...prev];
+          updated[existingIndex] = newError;
+          return updated;
+        }
+
+        return [...prev, newError];
+      });
+    },
+    [fields, recordMap, tableId, clearCellError]
+  );
+
+  useTableListener(tableId, ['taskFailed'], handleTaskFailed);
+  useTableListener(tableId, ['taskProcessing'], handleTaskProcessing);
+
+  // Update cell errors in grid
+  useEffect(() => {
+    gridRef.current?.setCellErrors(cellErrors);
+  }, [cellErrors]);
+
+  const onPresortContainerInit = () => {
+    if (!activeCell) return;
+
+    const { columnIndex, fieldId } = activeCell;
+
+    if (gridRef.current?.isEditing() && isNeedPersistEditing(allFields, fieldId)) return;
+    if (columnIndex == null) return;
+
+    const range = [columnIndex, 0] as IRange;
+    setTimeout(() => {
+      gridRef.current?.setSelection(emptySelection);
+      presortGridRef.current?.setSelection(
+        new CombinedSelection(SelectionRegionType.Cells, [range, range])
+      );
+    }, 100);
+  };
+
+  const onCellDblClick = (cell: ICellItem) => {
+    const [columnIndex, rowIndex] = cell;
+    const record = recordMap[rowIndex];
+    if (record == null) return;
+    const field = columns[columnIndex];
+    if (field == null) return;
+    if (record.isHidden(field.id)) {
+      return sonnerToast.warning(t('table:permission.cell.deniedRead'));
+    }
+    if (record.isLocked(field.id)) {
+      return sonnerToast.warning(t('table:permission.cell.deniedUpdate'));
+    }
+  };
+
   return (
     <div ref={containerRef} className="relative size-full">
       <Grid
         ref={gridRef}
         theme={theme}
-        style={{ pointerEvents: inPrefilling ? 'none' : 'auto' }}
+        style={{ pointerEvents: inPrefilling || inPresorting ? 'none' : 'auto' }}
         draggable={draggable}
+        disableEnterMoveDown={activeCell != null && moveTriggerFieldIds.has(activeCell.fieldId)}
         isTouchDevice={isTouchDevice}
         rowCount={realRowCount}
         rowHeight={rowHeight}
+        columnHeaderHeight={columnHeaderHeight}
         freezeColumnCount={frozenColumnCount}
         columnStatistics={columnStatistics}
         columns={columns}
@@ -717,21 +1699,35 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
         groupCollection={groupCollection}
         groupPoints={groupPoints as unknown as IGroupPoint[]}
         collaborators={collaborators}
+        searchCursor={searchCursor}
+        searchHitIndex={searchHitIndex}
         getCellContent={getCellContent}
         onDelete={getAuthorizedFunction(onDelete, 'record|update')}
+        onDragStart={onDragStart}
         onRowOrdered={onRowOrdered}
         onRowExpand={onRowExpandInner}
         onRowAppend={
           isTouchDevice ? undefined : getAuthorizedFunction(onRowAppend, 'record|create')
         }
         onCellEdited={getAuthorizedFunction(onCellEdited, 'record|update')}
+        onFillSelection={getAuthorizedFunction(onFillSelection, 'record|update')}
+        onCellDblClick={onCellDblClick}
         onColumnAppend={getAuthorizedFunction(onColumnAppend, 'field|create')}
         onColumnFreeze={getAuthorizedFunction(onColumnFreeze, 'view|update')}
+        onColumnFreezeFailed={getAuthorizedFunction(onColumnFreezeFailed, 'view|update')}
         onColumnResize={getAuthorizedFunction(onColumnResize, 'view|update')}
         onColumnOrdered={getAuthorizedFunction(onColumnOrdered, 'view|update')}
         onContextMenu={onContextMenu}
+        onGroupHeaderContextMenu={onGroupHeaderContextMenu}
         onColumnHeaderClick={onColumnHeaderClick}
-        onColumnStatisticClick={getAuthorizedFunction(onColumnStatisticClick, 'view|update')}
+        onColumnStatisticClick={
+          // Share viewers should see column statistics (read-only) — the
+          // workspace view|update gate would suppress this for them, matching
+          // the prior share grid behavior which always allowed this click.
+          shareId
+            ? onColumnStatisticClick
+            : getAuthorizedFunction(onColumnStatisticClick, 'view|update')
+        }
         onVisibleRegionChanged={onVisibleRegionChanged}
         onSelectionChanged={onSelectionChanged}
         onColumnHeaderDblClick={onColumnHeaderDblClick}
@@ -745,21 +1741,88 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
         onItemClick={onItemClick}
         onItemHovered={onItemHovered}
       />
+      {fieldAIEnable && (
+        <AiGenerateButton
+          ref={aiGenerateButtonRef}
+          gridRef={gridRef}
+          activeCell={activeCell}
+          recordMap={recordMap}
+          onGenerate={() => {
+            if (activeCell) {
+              clearCellError(activeCell.recordId, activeCell.fieldId);
+            }
+          }}
+        />
+      )}
+      {activeCell && (
+        <ResetClickCountButton
+          ref={resetClickCountButtonRef}
+          gridRef={gridRef}
+          activeCell={activeCell}
+          recordMap={recordMap}
+        />
+      )}
+      <SelectionStatistic
+        recordMap={recordMap}
+        columns={columns}
+        rowCount={realRowCount}
+        collapsedGroupIds={viewQuery?.collapsedGroupIds}
+      />
+
       {inPrefilling && (
-        <PrefillingRowContainer
-          style={prefillingRowStyle}
-          isLoading={isCreatingRecord}
-          onClickOutside={async () => {
-            if (isCreatingRecord || newRecords?.length) return;
-            await mutateCreateRecord([{ fields: prefillingFieldValueMap! }]);
-          }}
-          onCancel={() => {
-            setPrefillingRowIndex(undefined);
-            setPrefillingFieldValueMap(undefined);
-          }}
+        <PendingUploadContext.Provider value={pendingUploadCtx}>
+          <PrefillingRowContainer
+            style={prefillingRowStyle}
+            isLoading={isCreatingRecord}
+            onClickOutside={async () => {
+              if (isCreatingRecord || newRecords?.length) return;
+              await mutateCreateRecord([{ fields: prefillingFieldValueMap! }]);
+            }}
+            onCancel={() => {
+              if (tableId) {
+                cancelPendingUploads(tableId, tempRecordId);
+              }
+              setPrefillingRowIndex(undefined);
+              setPrefillingFieldValueMap(undefined);
+            }}
+          >
+            <Grid
+              ref={prefillingGridRef}
+              theme={theme}
+              scrollBufferX={
+                permission['field|create'] ? scrollBuffer + columnAppendBtnWidth : scrollBuffer
+              }
+              scrollBufferY={0}
+              scrollBarVisible={false}
+              rowCount={1}
+              rowHeight={rowHeight}
+              rowIndexVisible={false}
+              rowControls={rowControls}
+              draggable={DraggableType.None}
+              selectable={SelectableType.Cell}
+              columns={columns}
+              commentCountMap={commentCountMap}
+              columnHeaderHeight={0}
+              freezeColumnCount={frozenColumnCount}
+              customIcons={customIcons}
+              getCellContent={getPrefillingCellContent}
+              onScrollChanged={onPrefillingGridScrollChanged}
+              onCellEdited={onPrefillingCellEdited}
+              onCopy={(selection, e) => onCopyForSingleRow(e, selection, prefillingFieldValueMap)}
+              onPaste={onPasteForPrefilling}
+              onDelete={getAuthorizedFunction(onDeleteForPrefilling, 'record|update')}
+            />
+          </PrefillingRowContainer>
+        </PendingUploadContext.Provider>
+      )}
+      {presortRecord && (
+        <PresortRowContainer
+          style={presortRowStyle}
+          onInit={onPresortContainerInit}
+          onClickOutside={async () => setPresortRecordData(undefined)}
         >
           <Grid
-            ref={prefillingGridRef}
+            ref={presortGridRef}
             theme={theme}
             scrollBufferX={
               permission['field|create'] ? scrollBuffer + columnAppendBtnWidth : scrollBuffer
@@ -773,27 +1836,37 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
             draggable={DraggableType.None}
             selectable={SelectableType.Cell}
             columns={columns}
+            columnHeaderHeight={0}
             commentCountMap={commentCountMap}
-            columnHeaderVisible={false}
             freezeColumnCount={frozenColumnCount}
             customIcons={customIcons}
-            getCellContent={getPrefillingCellContent}
+            getCellContent={getPresortCellContent}
             onScrollChanged={onPrefillingGridScrollChanged}
-            onCellEdited={onPrefillingCellEdited}
-            onCopy={onCopyForPrefilling}
-            onPaste={onPasteForPrefilling}
+            onCellEdited={onPresortCellEdited}
+            onCopy={(selection, e) => onCopyForSingleRow(e, selection, presortRecord.fields)}
+            onPaste={onPasteForPresort}
+            onDelete={getAuthorizedFunction(onDeleteForPresort, 'record|update')}
           />
-        </PrefillingRowContainer>
+        </PresortRowContainer>
       )}
-      <RowCounter rowCount={realRowCount} className="absolute bottom-3 left-0" />
+      <RowCounter rowCount={realRowCount} className="absolute bottom-3 start-0" />
       <DomBox id={componentId} />
-      {!onRowExpand && <ExpandRecordContainer ref={expandRecordRef} recordServerData={ssrRecord} />}
+      {!onRowExpand && (
+        <ExpandRecordContainer
+          ref={expandRecordRef}
+          recordServerData={ssrRecord}
+          buttonClickStatusHook={buttonClickStatusHook}
+        />
+      )}
       {expandRecord != null && (
         <ExpandRecorder
           tableId={expandRecord.tableId}
+          viewId={activeViewId}
           recordId={expandRecord.recordId}
           recordIds={[expandRecord.recordId]}
+          isLinkedRecord
           onClose={() => setExpandRecord(undefined)}
+          buttonClickStatusHook={buttonClickStatusHook}
         />
       )}
       <ConfirmNewRecords
@@ -803,6 +1876,71 @@ export const GridViewBaseInner: React.FC<IGridViewBaseInnerProps> = (
           setNewRecords(undefined);
         }}
         onConfirm={() => newRecords && mutateCreateRecord(newRecords)}
+      />
+      <AiAutoFillDialogContainer
+        ref={aiAutoFillDialogRef}
+        group={group}
+        personalViewCommonQuery={personalViewCommonQuery}
+      />
+      <ClearSelectionProgressDialog
+        open={isClearProgressOpen}
+        mode={clearDialogMode ?? 'progress'}
+        progress={clearProgress}
+        summary={clearSummary}
+        errors={clearErrors}
+        status={clearProgressStatus}
+        confirmRecordCount={clearConfirmRecordCount}
+        onConfirm={confirmClearSelection}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeClearProgressDialog();
+          }
+        }}
+      />
+      <DeleteSelectionProgressDialog
+        open={isDeleteProgressOpen}
+        mode={deleteDialogMode ?? 'progress'}
+        progress={deleteProgress}
+        summary={deleteSummary}
+        errors={deleteErrors}
+        status={deleteProgressStatus}
+        confirmRecordCount={deleteConfirmRecordCount}
+        onConfirm={confirmDeleteSelection}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeDeleteProgressDialog();
+          }
+        }}
+      />
+      <DuplicateSelectionProgressDialog
+        open={isDuplicateProgressOpen}
+        mode={duplicateDialogMode ?? 'progress'}
+        progress={duplicateProgress}
+        summary={duplicateSummary}
+        errors={duplicateErrors}
+        status={duplicateProgressStatus}
+        confirmRecordCount={duplicateConfirmRecordCount}
+        onConfirm={confirmDuplicateSelection}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeDuplicateProgressDialog();
+          }
+        }}
+      />
+      <PasteSelectionProgressDialog
+        open={isPasteProgressOpen}
+        mode={pasteDialogMode ?? 'progress'}
+        progress={pasteProgress}
+        summary={pasteSummary}
+        errors={pasteErrors}
+        status={pasteProgressStatus}
+        confirmRecordCount={pasteConfirmRecordCount}
+        onConfirm={confirmPasteSelection}
+        onOpenChange={(open) => {
+          if (!open) {
+            closePasteProgressDialog();
+          }
+        }}
       />
     </div>
   );

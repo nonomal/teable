@@ -10,24 +10,34 @@ const baseFormatting = z.object({
   precision: z.number().max(5).min(0),
 });
 
-export const decimalFormattingSchema = baseFormatting.extend({
-  type: z.literal(NumberFormattingType.Decimal),
-});
+export const decimalFormattingSchema = baseFormatting
+  .extend({
+    type: z.literal(NumberFormattingType.Decimal),
+  })
+  .strict();
 
-export const percentFormattingSchema = baseFormatting.extend({
-  type: z.literal(NumberFormattingType.Percent),
-});
+export const percentFormattingSchema = baseFormatting
+  .extend({
+    type: z.literal(NumberFormattingType.Percent),
+  })
+  .strict();
 
-export const currencyFormattingSchema = baseFormatting.extend({
-  type: z.literal(NumberFormattingType.Currency),
-  symbol: z.string(),
-});
+export const currencyFormattingSchema = baseFormatting
+  .extend({
+    type: z.literal(NumberFormattingType.Currency),
+    symbol: z.string(),
+  })
+  .strict();
 
-export const numberFormattingSchema = z.union([
-  decimalFormattingSchema,
-  percentFormattingSchema,
-  currencyFormattingSchema,
-]);
+export const numberFormattingSchema = z
+  .discriminatedUnion('type', [
+    decimalFormattingSchema,
+    percentFormattingSchema,
+    currencyFormattingSchema,
+  ])
+  .describe(
+    'Only be used in number field (number field or formula / rollup field with cellValueType equals Number'
+  );
 
 export type IDecimalFormatting = z.infer<typeof decimalFormattingSchema>;
 
@@ -42,16 +52,17 @@ export const defaultNumberFormatting: INumberFormatting = {
   precision: 2,
 };
 
-export const formatNumberToString = (value: number | undefined, formatting: INumberFormatting) => {
+export const formatNumberToString = (value: number | undefined, formatting?: INumberFormatting) => {
   if (value == null) {
     return '';
   }
 
   const cellValue = Number(value);
-  const { type, precision } = formatting;
+  const resolvedFormatting = formatting ?? defaultNumberFormatting;
+  const { type, precision } = resolvedFormatting;
 
   if (type === NumberFormattingType.Currency) {
-    const symbol = formatting.symbol ?? '$';
+    const symbol = resolvedFormatting.symbol ?? '$';
     const sign = cellValue < 0 ? '-' : '';
     const options =
       precision != null
@@ -78,7 +89,7 @@ export const formatNumberToString = (value: number | undefined, formatting: INum
 };
 
 export const parseStringToNumber = (value: string | null, formatting?: INumberFormatting) => {
-  if (value == null) return null;
+  if (value == null || value === '') return null;
 
   const originStr = String(value);
   const isPercent = formatting?.type === NumberFormattingType.Percent || originStr.includes('%');

@@ -8,23 +8,35 @@ import {
   Get,
   Delete,
   Query,
-  BadRequestException,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
-import { Role } from '@teable/core';
-import type {
-  ICreateSpaceVo,
-  IUpdateSpaceVo,
-  IGetSpaceVo,
-  EmailInvitationVo,
-  ListSpaceInvitationLinkVo,
-  CreateSpaceInvitationLinkVo,
-  UpdateSpaceInvitationLinkVo,
-  ListSpaceCollaboratorVo,
-  IGetBaseAllVo,
-} from '@teable/openapi';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { HttpErrorCode, Role } from '@teable/core';
 import {
+  type IBaseEntryMapVo,
+  type ICreateSpaceVo,
+  type IUpdateSpaceVo,
+  type IGetSpaceVo,
+  type IDataDbConnectionSummaryVo,
+  type IDataDbMigrationJobStatusVo,
+  type IDataDbPreflightVo,
+  type EmailInvitationVo,
+  type ListSpaceInvitationLinkVo,
+  type CreateSpaceInvitationLinkVo,
+  type UpdateSpaceInvitationLinkVo,
+  type ListSpaceCollaboratorVo,
+  type IGetBaseAllVo,
+  type ITestLLMVo,
+  type ISpaceSearchVo,
   createSpaceRoSchema,
   ICreateSpaceRo,
+  getBaseEntryMapRoSchema,
+  IGetBaseEntryMapRo,
+  dataDbPreflightRoSchema,
+  IDataDbPreflightRo,
+  type ISpaceDataDbSummaryQuery,
+  spaceDataDbSummaryQuerySchema,
   updateSpaceRoSchema,
   IUpdateSpaceRo,
   emailSpaceInvitationRoSchema,
@@ -36,22 +48,74 @@ import {
   updateSpaceCollaborateRoSchema,
   UpdateSpaceCollaborateRo,
   CollaboratorType,
+  deleteSpaceCollaboratorRoSchema,
+  DeleteSpaceCollaboratorRo,
+  listSpaceCollaboratorRoSchema,
+  ListSpaceCollaboratorRo,
+  listSpaceUniqueCollaboratorRoSchema,
+  ListSpaceUniqueCollaboratorRo,
+  type ListSpaceUniqueCollaboratorVo,
+  addSpaceCollaboratorRoSchema,
+  AddSpaceCollaboratorRo,
+  createIntegrationRoSchema,
+  ICreateIntegrationRo,
+  updateIntegrationRoSchema,
+  IUpdateIntegrationRo,
+  testLLMRoSchema,
+  ITestLLMRo,
+  spaceSearchRoSchema,
+  ISpaceSearchRo,
 } from '@teable/openapi';
+import { ClsService } from 'nestjs-cls';
+import { CustomHttpException } from '../../custom.exception';
 import { EmitControllerEvent } from '../../event-emitter/decorators/emit-controller-event.decorator';
 import { Events } from '../../event-emitter/events';
+import { avatarUploadInterceptorOptions } from '../../utils/avatar';
 import { ZodValidationPipe } from '../../zod.validation.pipe';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CollaboratorService } from '../collaborator/collaborator.service';
 import { InvitationService } from '../invitation/invitation.service';
+import { LastVisitService } from '../user/last-visit/last-visit.service';
+import { DataDbBindingService } from './data-db-binding.service';
+import { DataDbPreflightService } from './data-db-preflight.service';
+import {
+  migrateSpaceTargetMode,
+  spaceDataDbAdminOnlyErrorCode,
+  spaceDataDbAdminOnlyMessage,
+} from './space-data-db-migration.constants';
+import { SpaceDataDbMigrationService } from './space-data-db-migration.service';
 import { SpaceService } from './space.service';
+
+const rejectSpaceDataDbMigrationFromSpaceApi = () => {
+  throw new CustomHttpException(spaceDataDbAdminOnlyMessage, HttpErrorCode.RESTRICTED_RESOURCE, {
+    errorCode: spaceDataDbAdminOnlyErrorCode,
+  });
+};
 
 @Controller('api/space/')
 export class SpaceController {
   constructor(
-    private readonly spaceService: SpaceService,
-    private readonly invitationService: InvitationService,
-    private readonly collaboratorService: CollaboratorService
+    protected readonly spaceService: SpaceService,
+    protected readonly invitationService: InvitationService,
+    protected readonly collaboratorService: CollaboratorService,
+    protected readonly dataDbPreflightService: DataDbPreflightService,
+    protected readonly dataDbBindingService: DataDbBindingService,
+    protected readonly cls: ClsService,
+    protected readonly spaceDataDbMigrationService: SpaceDataDbMigrationService,
+    protected readonly lastVisitService: LastVisitService
   ) {}
+
+  @Post('data-db/preflight')
+  @Permissions('space|create')
+  async preflightDataDb(
+    @Body(new ZodValidationPipe(dataDbPreflightRoSchema))
+    dataDbPreflightRo: IDataDbPreflightRo
+  ): Promise<IDataDbPreflightVo> {
+    if (dataDbPreflightRo.targetMode === migrateSpaceTargetMode) {
+      rejectSpaceDataDbMigrationFromSpaceApi();
+    }
+    return await this.dataDbPreflightService.preflight(dataDbPreflightRo);
+  }
 
   @Post()
   @Permissions('space|create')
@@ -74,12 +138,97 @@ export class SpaceController {
     return await this.spaceService.updateSpace(spaceId, updateSpaceRo);
   }
 
+  @Permissions('space|update')
+  @UseInterceptors(FileInterceptor('file', avatarUploadInterceptorOptions))
+  @Patch(':spaceId/avatar')
+  async updateSpaceAvatar(
+    @Param('spaceId') spaceId: string,
+    @UploadedFile() file: Express.Multer.File
+  ): Promise<void> {
+    return await this.spaceService.updateSpaceAvatar(spaceId, file);
+  }
+
   @Permissions('space|read')
   @Get(':spaceId')
   async getSpaceById(@Param('spaceId') spaceId: string): Promise<IGetSpaceVo> {
     return await this.spaceService.getSpaceById(spaceId);
   }
 
+  @Permissions('space|read')
+  @Get(':spaceId/data-db')
+  async getSpaceDataDb(
+    @Param('spaceId') spaceId: string,
+    @Query(new ZodValidationPipe(spaceDataDbSummaryQuerySchema))
+    query: ISpaceDataDbSummaryQuery
+  ): Promise<IDataDbConnectionSummaryVo> {
+    return await this.dataDbPreflightService.getSummary(spaceId, query);
+  }
+
+  @Permissions('space|update')
+  @Patch(':spaceId/data-db')
+  async updateSpaceDataDb(
+    @Param('spaceId') _spaceId: string,
+    @Body(new ZodValidationPipe(dataDbPreflightRoSchema))
+    _dataDbPreflightRo: IDataDbPreflightRo
+  ): Promise<IDataDbConnectionSummaryVo> {
+    return rejectSpaceDataDbMigrationFromSpaceApi();
+  }
+
+  @Permissions('space|update')
+  @Post(':spaceId/data-db/retest')
+  async retestSpaceDataDb(@Param('spaceId') spaceId: string): Promise<IDataDbConnectionSummaryVo> {
+    await this.dataDbBindingService.retestBinding(spaceId);
+    return await this.dataDbPreflightService.getSummary(spaceId);
+  }
+
+  @Permissions('space|update')
+  @Post(':spaceId/data-db/retry')
+  async retrySpaceDataDbMigration(
+    @Param('spaceId') spaceId: string
+  ): Promise<IDataDbConnectionSummaryVo> {
+    await this.dataDbBindingService.retryMigrationForSpace(spaceId);
+    return await this.dataDbPreflightService.getSummary(spaceId);
+  }
+
+  @Permissions('space|read')
+  @Get(':spaceId/data-db/migration/:jobId')
+  async getSpaceDataDbMigration(
+    @Param('spaceId') spaceId: string,
+    @Param('jobId') jobId: string
+  ): Promise<IDataDbMigrationJobStatusVo> {
+    rejectSpaceDataDbMigrationFromSpaceApi();
+    return await this.spaceDataDbMigrationService.getMigrationJobStatus(spaceId, jobId);
+  }
+
+  @Permissions('space|update')
+  @Post(':spaceId/data-db/migration/:jobId/cancel')
+  async cancelSpaceDataDbMigration(
+    @Param('spaceId') spaceId: string,
+    @Param('jobId') jobId: string
+  ): Promise<IDataDbMigrationJobStatusVo> {
+    rejectSpaceDataDbMigrationFromSpaceApi();
+    return await this.spaceDataDbMigrationService.cancelMigrationForSpace(
+      spaceId,
+      jobId,
+      this.cls.get('user.id') ?? ''
+    );
+  }
+
+  @Permissions('space|update')
+  @Post(':spaceId/data-db/migration/:jobId/rollback')
+  async rollbackSpaceDataDbMigration(
+    @Param('spaceId') spaceId: string,
+    @Param('jobId') jobId: string
+  ): Promise<IDataDbMigrationJobStatusVo> {
+    rejectSpaceDataDbMigrationFromSpaceApi();
+    return await this.spaceDataDbMigrationService.rollbackMigrationForSpace(
+      spaceId,
+      jobId,
+      this.cls.get('user.id') ?? ''
+    );
+  }
+
+  @Permissions('space|read')
   @Get()
   async getSpaceList(): Promise<IGetSpaceVo[]> {
     return await this.spaceService.getSpaceList();
@@ -126,6 +275,33 @@ export class SpaceController {
     return await this.spaceService.getBaseListBySpaceId(spaceId);
   }
 
+  @Permissions('base|read')
+  @Get(':spaceId/base-entry-map')
+  async getBaseEntryMap(
+    @Param('spaceId') spaceId: string,
+    @Query(new ZodValidationPipe(getBaseEntryMapRoSchema.pick({ take: true })))
+    query: Pick<IGetBaseEntryMapRo, 'take'>
+  ): Promise<IBaseEntryMapVo> {
+    // Reuse the permission-checked base list of this space, then resolve the
+    // entry URL of the first `take` bases from the user's own visit history
+    const baseList = await this.spaceService.getBaseListBySpaceId(spaceId);
+    const capped = query.take ? baseList.slice(0, query.take) : baseList;
+    const userId = this.cls.get('user.id');
+    return this.lastVisitService.getBaseEntryMap(
+      userId,
+      capped.map((base) => base.id)
+    );
+  }
+
+  @Permissions('space|read')
+  @Get(':spaceId/search')
+  async search(
+    @Param('spaceId') spaceId: string,
+    @Query(new ZodValidationPipe(spaceSearchRoSchema)) query: ISpaceSearchRo
+  ): Promise<ISpaceSearchVo> {
+    return await this.spaceService.search(spaceId, query);
+  }
+
   @Permissions('space|invite_link')
   @Patch(':spaceId/invitation/link/:invitationId')
   async updateInvitationLink(
@@ -164,13 +340,29 @@ export class SpaceController {
   @Get(':spaceId/collaborators')
   async listCollaborator(
     @Param('spaceId') spaceId: string,
-    @Query('includeBase') includeBase?: boolean,
-    @Query('includeSystem') includeSystem?: boolean
+    @Query(new ZodValidationPipe(listSpaceCollaboratorRoSchema))
+    options: ListSpaceCollaboratorRo
   ): Promise<ListSpaceCollaboratorVo> {
-    return await this.collaboratorService.getListBySpace(spaceId, { includeSystem, includeBase });
+    const stats = await this.collaboratorService.getSpaceCollaboratorStats(spaceId, options);
+    return {
+      collaborators: await this.collaboratorService.getListBySpace(spaceId, options),
+      total: stats.total,
+      uniqTotal: stats.uniqTotal,
+    };
+  }
+
+  @Permissions('space|read')
+  @Get(':spaceId/collaborators/unique')
+  async listUniqueCollaborator(
+    @Param('spaceId') spaceId: string,
+    @Query(new ZodValidationPipe(listSpaceUniqueCollaboratorRoSchema))
+    options: ListSpaceUniqueCollaboratorRo
+  ): Promise<ListSpaceUniqueCollaboratorVo> {
+    return this.collaboratorService.getUniqueListBySpace(spaceId, options);
   }
 
   @Patch(':spaceId/collaborators')
+  @Permissions('space|read')
   async updateCollaborator(
     @Param('spaceId') spaceId: string,
     @Body(new ZodValidationPipe(updateSpaceCollaborateRoSchema))
@@ -178,35 +370,130 @@ export class SpaceController {
   ): Promise<void> {
     if (
       updateSpaceCollaborateRo.role !== Role.Owner &&
-      (await this.collaboratorService.isUniqueOwnerUser(spaceId, updateSpaceCollaborateRo.userId))
+      (await this.collaboratorService.isUniqueOwnerUser(
+        spaceId,
+        updateSpaceCollaborateRo.principalId
+      ))
     ) {
-      throw new BadRequestException('Cannot change the role of the only owner of the space');
+      throw new CustomHttpException(
+        'Cannot change the role of the only owner of the space',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.space.cannotChangeOnlyOwnerRole',
+          },
+        }
+      );
     }
     await this.collaboratorService.updateCollaborator({
       resourceId: spaceId,
       resourceType: CollaboratorType.Space,
-      userId: updateSpaceCollaborateRo.userId,
-      role: updateSpaceCollaborateRo.role,
+      ...updateSpaceCollaborateRo,
     });
   }
 
   @Delete(':spaceId/collaborators')
+  @Permissions('space|read')
   async deleteCollaborator(
     @Param('spaceId') spaceId: string,
-    @Query('userId') userId: string
+    @Query(new ZodValidationPipe(deleteSpaceCollaboratorRoSchema))
+    deleteSpaceCollaboratorRo: DeleteSpaceCollaboratorRo
   ): Promise<void> {
-    if (await this.collaboratorService.isUniqueOwnerUser(spaceId, userId)) {
-      throw new BadRequestException('Cannot delete the only owner of the space');
+    if (
+      await this.collaboratorService.isUniqueOwnerUser(
+        spaceId,
+        deleteSpaceCollaboratorRo.principalId
+      )
+    ) {
+      throw new CustomHttpException(
+        'Cannot delete the only owner of the space',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.space.cannotDeleteOnlyOwner',
+          },
+        }
+      );
     }
     await this.collaboratorService.deleteCollaborator({
       resourceId: spaceId,
       resourceType: CollaboratorType.Space,
-      userId,
+      ...deleteSpaceCollaboratorRo,
+    });
+  }
+
+  @Delete(':spaceId/collaborators/base')
+  @Permissions('space|read')
+  async deleteBaseCollaborators(
+    @Param('spaceId') spaceId: string,
+    @Query(new ZodValidationPipe(deleteSpaceCollaboratorRoSchema))
+    deleteSpaceCollaboratorRo: DeleteSpaceCollaboratorRo
+  ): Promise<void> {
+    await this.collaboratorService.deleteBaseCollaboratorsBySpace({
+      spaceId,
+      ...deleteSpaceCollaboratorRo,
     });
   }
 
   @Delete(':spaceId/permanent')
+  @EmitControllerEvent(Events.SPACE_DELETE)
   async permanentDeleteSpace(@Param('spaceId') spaceId: string) {
-    return await this.spaceService.permanentDeleteSpace(spaceId);
+    await this.spaceService.permanentDeleteSpace(spaceId);
+    return { spaceId, permanent: true };
+  }
+
+  @Permissions('space|read')
+  @Post(':spaceId/collaborator')
+  async addCollaborators(
+    @Param('spaceId') spaceId: string,
+    @Body(new ZodValidationPipe(addSpaceCollaboratorRoSchema))
+    addSpaceCollaboratorRo: AddSpaceCollaboratorRo
+  ) {
+    return this.collaboratorService.addSpaceCollaborators(spaceId, addSpaceCollaboratorRo);
+  }
+
+  @Permissions('space|update')
+  @Get(':spaceId/integration')
+  async getIntegrationList(@Param('spaceId') spaceId: string) {
+    return this.spaceService.getIntegrationList(spaceId);
+  }
+
+  @Permissions('space|update')
+  @Post(':spaceId/integration')
+  async createIntegration(
+    @Param('spaceId') spaceId: string,
+    @Body(new ZodValidationPipe(createIntegrationRoSchema))
+    addIntegrationRo: ICreateIntegrationRo
+  ) {
+    return this.spaceService.createIntegration(spaceId, addIntegrationRo);
+  }
+
+  @Permissions('space|update')
+  @Patch(':spaceId/integration/:integrationId')
+  async updateIntegration(
+    @Param('spaceId') spaceId: string,
+    @Param('integrationId') integrationId: string,
+    @Body(new ZodValidationPipe(updateIntegrationRoSchema))
+    updateIntegrationRo: IUpdateIntegrationRo
+  ) {
+    return this.spaceService.updateIntegration(integrationId, updateIntegrationRo, spaceId);
+  }
+
+  @Permissions('space|update')
+  @Delete(':spaceId/integration/:integrationId')
+  async deleteIntegration(
+    @Param('spaceId') spaceId: string,
+    @Param('integrationId') integrationId: string
+  ) {
+    return this.spaceService.deleteIntegration(integrationId, spaceId);
+  }
+
+  @Permissions('space|update')
+  @Post(':spaceId/test-llm')
+  async testIntegrationLLM(
+    @Param('spaceId') _spaceId: string,
+    @Body(new ZodValidationPipe(testLLMRoSchema)) testLLMRo: ITestLLMRo
+  ): Promise<ITestLLMVo> {
+    return await this.spaceService.testIntegrationLLM(testLLMRo);
   }
 }

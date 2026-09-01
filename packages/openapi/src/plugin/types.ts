@@ -9,7 +9,7 @@ export const pluginI18nJsonSchema: z.ZodType<IPlugin18nJsonType> = z.lazy(() =>
   z.record(z.string(), z.union([z.string(), pluginI18nJsonSchema]))
 );
 
-export const pluginI18nSchema = z.record(z.enum(LOCALES), pluginI18nJsonSchema).openapi({
+export const pluginI18nSchema = z.partialRecord(z.enum(LOCALES), pluginI18nJsonSchema).meta({
   type: 'object',
   example: {
     en: {
@@ -28,6 +28,8 @@ export type IPluginI18n = z.infer<typeof pluginI18nSchema>;
 export enum PluginPosition {
   Dashboard = 'dashboard',
   View = 'view',
+  ContextMenu = 'contextMenu',
+  Panel = 'panel',
 }
 
 export enum PluginStatus {
@@ -51,3 +53,33 @@ export const pluginCreatedBySchema = z.object({
   email: z.string().email(),
   avatar: z.string().optional(),
 });
+
+export const pluginConfigSchema = z
+  .object({
+    [PluginPosition.ContextMenu]: z
+      .object({
+        width: z.number().or(z.string()),
+        height: z.number().or(z.string()),
+        x: z.number().or(z.string()),
+        y: z.number().or(z.string()),
+        frozenResize: z.boolean().optional(),
+        frozenDrag: z.boolean().optional(),
+      })
+      .partial(),
+    [PluginPosition.View]: z.null(),
+    [PluginPosition.Dashboard]: z.null(),
+    [PluginPosition.Panel]: z.null(),
+  })
+  .partial()
+  .superRefine((data, ctx) => {
+    const keys = Object.keys(data);
+    const res = z.array(z.enum(PluginPosition)).safeParse(keys);
+    if (!res.success) {
+      res.error.issues.forEach((issue) => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { path, ...issueWithoutPath } = issue;
+        ctx.addIssue(issueWithoutPath);
+      });
+    }
+  });
+export type IPluginConfig = z.infer<typeof pluginConfigSchema>;

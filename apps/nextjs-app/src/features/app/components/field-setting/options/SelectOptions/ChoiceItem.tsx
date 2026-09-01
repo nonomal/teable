@@ -1,13 +1,14 @@
 import type { ISelectFieldChoice } from '@teable/core';
-import { ColorUtils } from '@teable/core';
+import { useTheme } from '@teable/next-themes';
+import { getSelectColorPairs } from '@teable/sdk';
 import { Popover, PopoverTrigger, Button, PopoverContent, Input } from '@teable/ui-lib/shadcn';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ColorPicker } from './ColorPicker';
 
 interface IOptionItemProps {
   choice: ISelectFieldChoice;
   readonly?: boolean;
-  onChange: (key: keyof ISelectFieldChoice, value: string) => void;
+  onChange?: (key: keyof ISelectFieldChoice, value: string) => void;
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   onInputRef?: (el: HTMLInputElement | null) => void;
 }
@@ -15,7 +16,8 @@ interface IOptionItemProps {
 export const ChoiceItem = (props: IOptionItemProps) => {
   const { choice, readonly, onChange, onKeyDown, onInputRef } = props;
   const { color, name } = choice;
-  const bgColor = ColorUtils.getHexForColor(color);
+  const { resolvedTheme } = useTheme();
+  const bgColor = getSelectColorPairs(color, resolvedTheme).backgroundColor;
 
   return (
     <li className="flex grow items-center">
@@ -34,8 +36,12 @@ export const ChoiceItem = (props: IOptionItemProps) => {
               <div style={{ backgroundColor: bgColor }} className="size-3 rounded-full" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent className="w-auto p-2">
-            <ColorPicker color={color} onSelect={(color) => onChange('color', color)} />
+          <PopoverContent className="w-auto bg-background p-2">
+            <ColorPicker
+              themeAwareSelectColor
+              color={color}
+              onSelect={(color) => onChange?.('color', color)}
+            />
           </PopoverContent>
         </Popover>
       )}
@@ -45,7 +51,7 @@ export const ChoiceItem = (props: IOptionItemProps) => {
           name={name}
           readOnly={readonly}
           onKeyDown={(e) => onKeyDown?.(e)}
-          onChange={(value) => onChange('name', value)}
+          onChange={(value) => onChange?.('name', value)}
         />
       </div>
     </li>
@@ -60,6 +66,20 @@ export const ChoiceInput: React.FC<{
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
 }> = ({ name, readOnly, onChange, onKeyDown, reRef }) => {
   const [value, setValue] = useState<string>(name);
+  const valueRef = useRef<string>(value);
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
+
+  // Save on unmount (e.g., during virtual scrolling)
+  useEffect(() => {
+    return () => {
+      if (valueRef.current !== name) {
+        onChange(valueRef.current);
+      }
+    };
+  }, [name, onChange]);
+
   const onChangeInner = (e: React.ChangeEvent<HTMLInputElement>) => {
     const curValue = e.target.value;
     setValue(curValue);
@@ -68,7 +88,6 @@ export const ChoiceInput: React.FC<{
   return (
     <Input
       ref={reRef}
-      className="h-7"
       type="text"
       value={value}
       readOnly={readOnly}

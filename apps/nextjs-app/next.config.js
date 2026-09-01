@@ -1,7 +1,7 @@
 // @ts-check
 
-const { readFileSync } = require('node:fs');
-const path = require('node:path');
+const { readFileSync } = require('fs');
+const path = require('path');
 const { createSecureHeaders } = require('next-secure-headers');
 const pc = require('picocolors');
 
@@ -24,27 +24,25 @@ const NEXT_BUILD_ENV_OUTPUT = process.env?.NEXT_BUILD_ENV_OUTPUT ?? 'classic';
 const NEXT_BUILD_ENV_TSCONFIG = process.env?.NEXT_BUILD_ENV_TSCONFIG ?? 'tsconfig.json';
 
 const NEXT_BUILD_ENV_TYPECHECK = trueEnv.includes(process.env?.NEXT_BUILD_ENV_TYPECHECK ?? 'true');
-const NEXT_BUILD_ENV_LINT = trueEnv.includes(process.env?.NEXT_BUILD_ENV_LINT ?? 'true');
 const NEXT_BUILD_ENV_SOURCEMAPS = trueEnv.includes(
   process.env?.NEXT_BUILD_ENV_SOURCEMAPS ?? String(isProd)
 );
 
 const NEXT_BUILD_ENV_CSP = trueEnv.includes(process.env?.NEXT_BUILD_ENV_CSP ?? 'true');
-const NEXT_ENV_IMAGES_ALL_REMOTE = trueEnv.includes(
-  process.env?.NEXT_ENV_IMAGES_ALL_REMOTE ?? 'true'
-);
 
 const NEXT_BUILD_ENV_SENTRY_ENABLED = trueEnv.includes(
   process.env?.NEXT_BUILD_ENV_SENTRY_ENABLED ?? 'false'
 );
-const NEXT_BUILD_ENV_SENTRY_UPLOAD_DRY_RUN = trueEnv.includes(
-  process.env?.NEXT_BUILD_ENV_SENTRY_UPLOAD_DRY_RUN ?? 'false'
-);
+
 const NEXT_BUILD_ENV_SENTRY_DEBUG = trueEnv.includes(
   process.env?.NEXT_BUILD_ENV_SENTRY_DEBUG ?? 'false'
 );
 const NEXT_BUILD_ENV_SENTRY_TRACING = trueEnv.includes(
   process.env?.NEXT_BUILD_ENV_SENTRY_TRACING ?? 'false'
+);
+// Whether to upload sourcemaps to Sentry (default: false for security)
+const NEXT_BUILD_ENV_SENTRY_SOURCEMAPS_UPLOAD = trueEnv.includes(
+  process.env?.NEXT_BUILD_ENV_SENTRY_SOURCEMAPS_UPLOAD ?? 'false'
 );
 
 const NEXTJS_SOCKET_PORT = process.env.SOCKET_PORT || '3001';
@@ -85,16 +83,25 @@ const secureHeaders = createSecureHeaders({
             "'unsafe-eval'",
             "'unsafe-inline'",
             'https://www.clarity.ms',
+            'https://*.posthog.com',
             'https://*.teable.io',
+            'https://*.teable.ai',
             'https://*.teable.cn',
+            // Google Picker loader (apis.google.com/js/api.js) for the Google
+            // Sheets importer; the picker widget itself is an iframe covered by
+            // frameSrc below.
+            'https://apis.google.com',
           ],
-          frameSrc: ["'self'", 'blob:'],
+          frameSrc: ["'self'", 'blob:', '*'],
           connectSrc: [
             "'self'",
             'https://*.sentry.io',
             'https://*.teable.io',
+            'https://*.teable.ai',
             'https://*.teable.cn',
             'https://*.clarity.ms',
+            'https://*.posthog.com',
+            'https://apis.google.com',
           ],
           mediaSrc: ["'self'", 'https:', 'http:', 'data:'],
           imgSrc: ["'self'", 'https:', 'http:', 'data:'],
@@ -114,9 +121,23 @@ const secureHeaders = createSecureHeaders({
  * @type {import('next').NextConfig}
  */
 const nextConfig = {
+  assetPrefix:
+    isProd && process.env.NEXT_BUILD_ENV_ASSET_PREFIX
+      ? process.env.NEXT_BUILD_ENV_ASSET_PREFIX
+      : undefined,
+  crossOrigin: 'anonymous',
   reactStrictMode: true,
   productionBrowserSourceMaps: NEXT_BUILD_ENV_SOURCEMAPS === true,
-  optimizeFonts: true,
+  // Transpile packages that use React to ensure single React instance
+  transpilePackages: [
+    'streamdown',
+    'd3-interpolate',
+    'd3-color',
+    // Fix Turbopack "unexpected export *" warnings for CommonJS modules
+    '@dnd-kit/core',
+    '@dnd-kit/sortable',
+    '@dnd-kit/utilities',
+  ],
 
   httpAgentOptions: {
     // @link https://nextjs.org/blog/next-11-1#builds--data-fetching
@@ -128,22 +149,8 @@ const nextConfig = {
     maxInactiveAge: (isCI ? 3600 : 25) * 1000,
   },
 
-  // @link https://nextjs.org/docs/advanced-features/compiler#minification
-  // @link discussion: https://github.com/vercel/next.js/discussions/30237
-  // Sometimes buggy so enable/disable when debugging.
-  swcMinify: true,
-
-  compiler: {
-    // emotion: true,
-  },
-
-  sentry: {
-    hideSourceMaps: true,
-    // To disable the automatic instrumentation of API route handlers and server-side data fetching functions
-    // In other words, disable if you prefer to explicitly handle sentry per api routes (ie: wrapApiHandlerWithSentry)
-    // https://docs.sentry.io/platforms/javascript/guides/nextjs/manual-setup/#configure-server-side-auto-instrumentation
-    autoInstrumentServerFunctions: false,
-  },
+  // Note: sentry configuration moved to withSentryConfig wrapper
+  // See: https://docs.sentry.io/platforms/javascript/guides/nextjs/
 
   // @link https://nextjs.org/docs/basic-features/image-optimization
   images: {
@@ -155,23 +162,6 @@ const nextConfig = {
     dangerouslyAllowSVG: false,
     disableStaticImages: false,
     contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
-    remotePatterns: NEXT_ENV_IMAGES_ALL_REMOTE
-      ? [
-          {
-            protocol: 'http',
-            hostname: '**',
-          },
-          {
-            protocol: 'https',
-            hostname: '**',
-          },
-        ]
-      : [
-          {
-            protocol: 'https',
-            hostname: '*.teable.*',
-          },
-        ],
     unoptimized: false,
   },
 
@@ -180,6 +170,10 @@ const nextConfig = {
   ...(NEXT_BUILD_ENV_OUTPUT === 'standalone'
     ? { output: 'standalone', outputFileTracing: true }
     : {}),
+
+  // Server-only packages that should not be bundled for the browser
+  // @link https://nextjs.org/docs/app/api-reference/config/next-config-js/serverExternalPackages
+  serverExternalPackages: ['next-i18next', 'i18next-fs-backend'],
 
   experimental: {
     // @link https://nextjs.org/docs/advanced-features/output-file-tracing#caveats
@@ -194,8 +188,31 @@ const nextConfig = {
     // @link {https://github.com/vercel/next.js/discussions/26420|Discussion}
     externalDir: true,
 
+    // Increase middleware client max body size for large file uploads (e.g., .tea import files)
+    // @link https://nextjs.org/docs/app/api-reference/config/next-config-js/proxyClientMaxBodySize
+    proxyClientMaxBodySize: '1024mb',
+
+    // Optimize package imports for better bundle size and faster builds
+    // @link https://vercel.com/blog/how-we-optimized-package-imports-in-next-js
+    optimizePackageImports: ['lucide-react', 'date-fns', '@tanstack/react-virtual'],
+
     // Experimental /app dir
     // appDir: true,
+  },
+
+  // Turbopack configuration (Next.js 16 default bundler)
+  turbopack: {
+    root: workspaceRoot,
+    rules: {
+      '*.svg': {
+        loaders: ['@svgr/webpack'],
+        as: '*.js',
+      },
+    },
+    resolveAlias: {
+      // Required: next-i18next and i18next-fs-backend require 'fs' at top level
+      fs: './turbopack-empty-stub.js',
+    },
   },
 
   typescript: {
@@ -203,10 +220,8 @@ const nextConfig = {
     tsconfigPath: NEXT_BUILD_ENV_TSCONFIG,
   },
 
-  eslint: {
-    ignoreDuringBuilds: !NEXT_BUILD_ENV_LINT,
-    // dirs: [`${__dirname}/src`],
-  },
+  // Note: eslint configuration is no longer supported in next.config.js
+  // Use ESLint CLI directly: npx eslint .
 
   // @link https://nextjs.org/docs/api-reference/next.config.js/rewrites
   async rewrites() {
@@ -222,31 +237,61 @@ const nextConfig = {
   async headers() {
     return [
       {
+        // StreamSaver service worker files - needs relaxed CORS for iframe/popup
+        source: '/streamsaver/:path*',
+        headers: [
+          { key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' },
+          { key: 'Cross-Origin-Embedder-Policy', value: 'credentialless' },
+          { key: 'Cross-Origin-Resource-Policy', value: 'cross-origin' },
+        ],
+      },
+      {
         // All page routes, not the api ones
-        source: '/:path((?!api).*)*',
+        source: '/:path((?!api|streamsaver).*)*',
         headers: [
           ...secureHeaders,
-          { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+          // allow-popups (not same-origin) so OAuth connect popups keep their
+          // opener link across the cross-origin provider hop — otherwise the
+          // opener can't close the popup and window.close() inside it is blocked,
+          // leaving a stranded "Connected" window. (streamsaver uses the same.)
+          { key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' },
           { key: 'Cross-Origin-Embedder-Policy', value: 'same-origin' },
+        ],
+      },
+      {
+        // Pages rendered INSIDE an OAuth popup opened by a cross-origin page
+        // (e.g. a generated app signing in with Teable). For the popup side,
+        // any COOP value except unsafe-none severs it from its opener —
+        // allow-popups above only protects the opener side. Must come after
+        // the all-pages rule so this value wins (later setHeader overwrites).
+        // Keep in sync with the backend middleware (utils/oauth-popup-coop.ts).
+        source: '/auth/:path(login|signup)',
+        headers: [{ key: 'Cross-Origin-Opener-Policy', value: 'unsafe-none' }],
+      },
+      {
+        source: '/oauth/decision',
+        headers: [{ key: 'Cross-Origin-Opener-Policy', value: 'unsafe-none' }],
+      },
+      {
+        source: '/images/(.*)',
+        headers: [
+          { key: 'Access-Control-Allow-Origin', value: '*' },
+          { key: 'Access-Control-Allow-Methods', value: 'GET' },
+          // Override the restrictive CORS policies for images
+          { key: 'Cross-Origin-Resource-Policy', value: 'cross-origin' },
+          { key: 'Cross-Origin-Embedder-Policy', value: 'credentialless' },
+          { key: 'Cross-Origin-Opener-Policy', value: 'unsafe-none' },
         ],
       },
     ];
   },
 
-  webpack: (config, { webpack, isServer }) => {
+  webpack: (config, { isServer }) => {
     if (!isServer) {
       // Fixes npm packages that depend on `fs` module
       // @link https://github.com/vercel/next.js/issues/36514#issuecomment-1112074589
       config.resolve.fallback = { ...config.resolve.fallback, fs: false };
     }
-
-    // https://docs.sentry.io/platforms/javascript/guides/nextjs/configuration/tree-shaking/
-    config.plugins.push(
-      new webpack.DefinePlugin({
-        __SENTRY_DEBUG__: NEXT_BUILD_ENV_SENTRY_DEBUG,
-        __SENTRY_TRACING__: NEXT_BUILD_ENV_SENTRY_TRACING,
-      })
-    );
 
     // Grab the existing rule that handles SVG imports
     const fileLoaderRule = config.module.rules.find(
@@ -277,7 +322,8 @@ const nextConfig = {
   env: {
     APP_NAME: packageJson.name ?? 'not-in-package.json',
     APP_VERSION: packageJson.version ?? 'not-in-package.json',
-    BUILD_TIME: new Date().toISOString(),
+    // Note: Sentry debug/tracing variables are handled via webpack DefinePlugin
+    // and cannot be set via Next.js env config (reserved key format)
   },
 };
 
@@ -289,24 +335,29 @@ if (NEXT_BUILD_ENV_SENTRY_ENABLED === true) {
     const { withSentryConfig } = require('@sentry/nextjs');
     // @ts-ignore because sentry does not match nextjs current definitions
     config = withSentryConfig(config, {
-      // Additional config options for the Sentry Webpack plugin. Keep in mind that
+      // Additional config options for the Sentry webpack plugin. Keep in mind that
       // the following options are set automatically, and overriding them is not
       // recommended:
       //   release, url, org, project, authToken, configFile, stripPrefix,
       //   urlPrefix, include, ignore
       // For all available options, see:
-      // https://github.com/getsentry/sentry-webpack-plugin#options.
+      // https://docs.sentry.io/platforms/javascript/guides/nextjs/configuration/build/
       // silent: isProd, // Suppresses all logs
-      dryRun: NEXT_BUILD_ENV_SENTRY_UPLOAD_DRY_RUN === true,
+      sourcemaps: {
+        // Upload only when explicitly enabled (default: disabled for security)
+        disable: !NEXT_BUILD_ENV_SENTRY_SOURCEMAPS_UPLOAD,
+        deleteSourcemapsAfterUpload: true, // Prevent .map files from leaking source code
+      },
+      bundleSizeOptimizations: {
+        excludeDebugStatements: !NEXT_BUILD_ENV_SENTRY_DEBUG,
+        excludeTracing: !NEXT_BUILD_ENV_SENTRY_TRACING,
+      },
       silent: NEXT_BUILD_ENV_SENTRY_DEBUG === false,
     });
     console.log(`- ${pc.green('info')} Sentry enabled for this build`);
-  } catch {
-    console.log(`- ${pc.red('error')} Could not enable sentry, import failed`);
+  } catch (e) {
+    console.log(`- ${pc.red('error')} Could not enable sentry, import failed`, e);
   }
-} else {
-  const { sentry, ...rest } = config;
-  config = rest;
 }
 
 if (tmModules.length > 0) {

@@ -3,12 +3,13 @@ import { Injectable } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import type { ISelectFieldOptions } from '@teable/core';
 import { FieldType, generateRecordHistoryId } from '@teable/core';
-import { PrismaService } from '@teable/db-main-prisma';
 import type { Field } from '@teable/db-main-prisma';
-import { Knex } from 'knex';
-import { isString } from 'lodash';
-import { InjectModel } from 'nest-knexjs';
+import { isEqual, isObject, isString } from 'lodash';
 import { BaseConfig, IBaseConfig } from '../../configs/base.config';
+import { DataLoaderService } from '../../features/data-loader/data-loader.service';
+import { rawField2FieldObj } from '../../features/field/model/factory';
+import { DatabaseRouter } from '../../global/database-router.service';
+import { EventEmitterService } from '../event-emitter.service';
 import { Events, RecordUpdateEvent } from '../events';
 
 // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -17,9 +18,10 @@ const SELECT_FIELD_TYPE_SET = new Set([FieldType.SingleSelect, FieldType.Multipl
 @Injectable()
 export class RecordHistoryListener {
   constructor(
-    private readonly prismaService: PrismaService,
+    private readonly databaseRouter: DatabaseRouter,
+    private readonly eventEmitterService: EventEmitterService,
     @BaseConfig() private readonly baseConfig: IBaseConfig,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex
+    private readonly dataLoaderService: DataLoaderService
   ) {}
 
   @OnEvent(Events.TABLE_RECORD_UPDATE, { async: true })
@@ -47,25 +49,11 @@ export class RecordHistoryListener {
 
     const fieldIds = Array.from(fieldIdSet);
 
-    const applyFields = await this.prismaService.field.findMany({
-      where: {
-        id: { in: fieldIds },
-      },
-      select: {
-        id: true,
-        type: true,
-        name: true,
-        options: true,
-        cellValueType: true,
-        isComputed: true,
-      },
+    const fields = await this.dataLoaderService.field.load(tableId, {
+      id: fieldIds,
     });
-    const fields = applyFields.map(({ options, ...rest }) => ({
-      ...rest,
-      options: options ? JSON.parse(options) : options,
-    }));
 
-    const fieldMap = new Map(fields.map((field) => [field.id, field]));
+    const fieldMap = new Map(fields.map((field) => [field.id, rawField2FieldObj(field)]));
 
     const batchSize = 5000;
     const totalCount = records.length;
@@ -84,15 +72,25 @@ export class RecordHistoryListener {
 
       batch.forEach((record) => {
         const { id: recordId, fields } = record;
-
         Object.entries(fields).forEach(([fieldId, changeValue]) => {
           const field = fieldMap.get(fieldId);
 
-          if (!field) return null;
+          if (!field || !changeValue || !isObject(changeValue)) {
+            return null;
+          }
+
+          if (!('oldValue' in changeValue) || !('newValue' in changeValue)) {
+            return null;
+          }
 
           const oldField = _oldField ?? field;
           const { type, name, cellValueType, isComputed } = field;
           const { oldValue, newValue } = changeValue;
+
+          // Skip no-op changes to avoid duplicate history entries
+          if (isEqual(oldValue, newValue)) {
+            return null;
+          }
 
           if (oldField.isComputed && isComputed) {
             return null;
@@ -126,10 +124,23 @@ export class RecordHistoryListener {
         });
       });
 
-      const query = this.knex.insert(recordHistoryList).into('record_history').toQuery();
+      if (recordHistoryList.length) {
+        const dataKnex = await this.databaseRouter.dataKnexForTable(tableId);
+        const dataDbUrl = await this.databaseRouter.getDataDatabaseUrlForTable(tableId);
+        const dataDbInternalSchema = new URL(dataDbUrl).searchParams.get('schema') || 'public';
+        const query = dataKnex
+          .withSchema(dataDbInternalSchema)
+          .insert(recordHistoryList)
+          .into('record_history')
+          .toQuery();
 
-      await this.prismaService.$executeRawUnsafe(query);
+        await this.databaseRouter.executeDataPrismaForTable(tableId, query);
+      }
     }
+
+    this.eventEmitterService.emit(Events.RECORD_HISTORY_CREATE, {
+      recordIds: records.map((record) => record.id),
+    });
   }
 
   private minimizeFieldOptions(

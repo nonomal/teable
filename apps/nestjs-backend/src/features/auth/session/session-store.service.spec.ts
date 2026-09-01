@@ -143,21 +143,43 @@ describe('SessionStoreService', () => {
       expect(result).toBeNull();
     });
 
-    it('should return undefined and delete session if user session is not found', async () => {
-      // Mock the necessary cacheService methods
+    it('repairs the user-session map when the entry was lost without a clear', async () => {
+      // expire flag, session store, user map (entry lost), no clear tombstone
       cacheService.get.mockResolvedValueOnce(undefined);
       cacheService.get.mockResolvedValueOnce(sessionData);
       cacheService.get.mockResolvedValueOnce(undefined);
-      cacheService.del.mockResolvedValueOnce();
+      cacheService.get.mockResolvedValueOnce(undefined);
 
       const result = await sessionStoreService['getCache'](sid);
 
-      // Verify that cacheService.get and cacheService.del were called with the expected parameters
+      expect(cacheService.get).toHaveBeenCalledWith(`auth:session-user-cleared:user-id`);
+      // A concurrent signin/touch clobbered the map entry — the session must be
+      // re-registered, not destroyed.
+      expect(cacheService.set).toHaveBeenCalledWith(
+        `auth:session-user:user-id`,
+        expect.objectContaining({ [sid]: expect.any(Number) }),
+        expect.any(Number)
+      );
+      expect(cacheService.del).not.toHaveBeenCalled();
+      expect(result).toBe(sessionData);
+    });
+
+    it('deletes the session on a lost map entry when the user sessions were cleared', async () => {
+      // expire flag, session store, user map (entry lost), clear tombstone in
+      // the future relative to the session's renewal time
+      cacheService.get.mockResolvedValueOnce(undefined);
+      cacheService.get.mockResolvedValueOnce(sessionData);
+      cacheService.get.mockResolvedValueOnce(undefined);
+      cacheService.get.mockResolvedValueOnce(Math.floor(Date.now() / 1000) + 60);
+      cacheService.del.mockResolvedValueOnce(true);
+
+      const result = await sessionStoreService['getCache'](sid);
+
       expect(cacheService.get).toHaveBeenCalledWith(`auth:session-expire:${sid}`);
       expect(cacheService.get).toHaveBeenCalledWith(`auth:session-store:${sid}`);
       expect(cacheService.get).toHaveBeenCalledWith(`auth:session-user:user-id`);
+      expect(cacheService.get).toHaveBeenCalledWith(`auth:session-user-cleared:user-id`);
       expect(cacheService.del).toHaveBeenCalledWith(`auth:session-store:${sid}`);
-      // Verify that the result is null and session is deleted when user session is not found
       expect(result).toBeNull();
     });
 
@@ -167,8 +189,8 @@ describe('SessionStoreService', () => {
       cacheService.get.mockResolvedValueOnce(false);
       cacheService.get.mockResolvedValueOnce(sessionData);
       cacheService.get.mockResolvedValueOnce({ [sid]: nowSec - 1, 'session-id-x': nowSec + 22 }); // Expired user session
-      cacheService.del.mockResolvedValueOnce();
-      cacheService.del.mockResolvedValueOnce();
+      cacheService.del.mockResolvedValueOnce(true);
+      cacheService.del.mockResolvedValueOnce(true);
       cacheService.set.mockResolvedValueOnce();
 
       const result = await sessionStoreService['getCache'](sid);
@@ -179,7 +201,7 @@ describe('SessionStoreService', () => {
       expect(cacheService.get).toHaveBeenCalledWith(`auth:session-user:user-id`);
       expect(cacheService.del).toHaveBeenCalledWith(`auth:session-store:${sid}`);
       expect(cacheService.del).toHaveBeenCalledWith(`auth:session-store:${sid}`);
-      cacheService.del.mockResolvedValueOnce();
+      cacheService.del.mockResolvedValueOnce(true);
 
       expect(cacheService.set).toHaveBeenCalledWith(
         `auth:session-user:user-id`,
@@ -273,7 +295,7 @@ describe('SessionStoreService', () => {
   describe('destroy', () => {
     it('should delete session from cache and call callback', async () => {
       // Mock the necessary methods
-      cacheService.del.mockResolvedValueOnce();
+      cacheService.del.mockResolvedValueOnce(true);
 
       await sessionStoreService.destroy(sid, callbackMock);
 
@@ -348,7 +370,7 @@ describe('SessionStoreService', () => {
       // Mock the necessary methods
       cacheService.get.mockResolvedValueOnce({ 'session-id': 123 });
       cacheService.set.mockResolvedValueOnce();
-      cacheService.del.mockResolvedValueOnce();
+      cacheService.del.mockResolvedValueOnce(true);
 
       await sessionStoreService.clearByUserId(userId);
 

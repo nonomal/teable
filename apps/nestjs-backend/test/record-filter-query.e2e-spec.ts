@@ -3,16 +3,17 @@
 /* eslint-disable sonarjs/cognitive-complexity */
 import type { INestApplication } from '@nestjs/common';
 import type { IFilter, IOperator } from '@teable/core';
-import { and, FieldKeyType } from '@teable/core';
+import { and, FieldKeyType, FieldType } from '@teable/core';
 import type { ITableFullVo } from '@teable/openapi';
 import { getRecords as apiGetRecords, createField, getFields } from '@teable/openapi';
-import { x_20 } from './data-helpers/20x';
+import { textField, x_20 } from './data-helpers/20x';
 import { x_20_link, x_20_link_from_lookups } from './data-helpers/20x-link';
 import {
   CHECKBOX_FIELD_CASES,
   CHECKBOX_LOOKUP_FIELD_CASES,
   DATE_FIELD_CASES,
   DATE_LOOKUP_FIELD_CASES,
+  DATE_RANGE_ERROR_CASES,
   MULTIPLE_SELECT_FIELD_CASES,
   MULTIPLE_SELECT_LOOKUP_FIELD_CASES,
   MULTIPLE_USER_FIELD_CASES,
@@ -33,6 +34,12 @@ const testDesc = `should filter [$operator], query value: $queryValue, expect re
 describe('OpenAPI Record-Filter-Query (e2e)', () => {
   let app: INestApplication;
   const baseId = globalThis.testConfig.baseId;
+  const isForceV2 = process.env.FORCE_V2_ALL === 'true';
+  // NOTE: v1 and v2 agree here — the shared core `validateCellValue` for
+  // single-line text transforms '' to null, so the x_20 empty-string record is
+  // empty on both write paths and the lookup counts match (isEmpty=7,
+  // isNotEmpty=14).
+  const textLookupFieldCases = TEXT_LOOKUP_FIELD_CASES;
 
   beforeAll(async () => {
     const appCtx = await initApp();
@@ -84,7 +91,7 @@ describe('OpenAPI Record-Filter-Query (e2e)', () => {
       conjunction,
     };
 
-    const { records } = await getFilterRecord(tableId, viewId, filter);
+    const { records } = await getFilterRecord(tableId, viewId!, filter);
     expect(records.length).toBe(expectResultLength);
     if (!expectMoreResults) {
       expect(records).not.toMatchObject([
@@ -142,6 +149,45 @@ describe('OpenAPI Record-Filter-Query (e2e)', () => {
     describe('simple filter multiple select field record', () => {
       test.each(MULTIPLE_SELECT_FIELD_CASES)(testDesc, async (param) => doTest(table, param));
     });
+
+    describe('dateRange invalid filters are skipped instead of crashing the query', () => {
+      // [V2-BUG] v2 compat 层 record-open-api-v2.service.ts 的 mapLegacyDateRangeCondition 对倒置区间抛 400，而 v2 引擎/新 mapper 均按 v1 parity 跳过（编译为 no-op TRUE） —— v2 修复后重新启用（T6703）
+      it.skipIf(isForceV2)('skips when start > end (compiler-level validation)', async () => {
+        const { fieldIndex, operator, queryValue } = DATE_RANGE_ERROR_CASES.invalidRange;
+        const filter: IFilter = {
+          filterSet: [
+            {
+              fieldId: table.fields[fieldIndex].id,
+              value: queryValue,
+              operator,
+            },
+          ],
+          conjunction: and.value,
+        };
+        const result = await getFilterRecord(table.id, table.views[0].id, filter);
+        expect(result.records.length).toBeGreaterThan(0);
+      });
+
+      // [V2-BUG] 同上：v2 compat 层对 dateRange+isNot 抛 400（'dateRange mode only supports is/isWithIn operators'），v2 引擎层 TableRecordConditionWhereVisitor 按 v1 parity 跳过 —— v2 修复后重新启用（T6703）
+      it.skipIf(isForceV2)(
+        'skips when dateRange is used with isNot operator (analyzer-level validation)',
+        async () => {
+          const { fieldIndex, operator, queryValue } = DATE_RANGE_ERROR_CASES.invalidOperator;
+          const filter: IFilter = {
+            filterSet: [
+              {
+                fieldId: table.fields[fieldIndex].id,
+                value: queryValue,
+                operator,
+              },
+            ],
+            conjunction: and.value,
+          };
+          const result = await getFilterRecord(table.id, table.views[0].id, filter);
+          expect(result.records.length).toBeGreaterThan(0);
+        }
+      );
+    });
   });
 
   describe('lookup field filter record', () => {
@@ -176,7 +222,7 @@ describe('OpenAPI Record-Filter-Query (e2e)', () => {
     });
 
     describe('filter lookup text field record', () => {
-      test.each(TEXT_LOOKUP_FIELD_CASES)(testDesc, async (param) => doTest(subTable, param));
+      test.each(textLookupFieldCases)(testDesc, async (param) => doTest(subTable, param));
     });
     describe('filter lookup number field record', () => {
       test.each(NUMBER_LOOKUP_FIELD_CASES)(testDesc, async (param) => doTest(subTable, param));
@@ -213,6 +259,55 @@ describe('OpenAPI Record-Filter-Query (e2e)', () => {
       test.each(MULTIPLE_SELECT_LOOKUP_FIELD_CASES)(testDesc, async (param) =>
         doTest(subTable, param)
       );
+    });
+  });
+
+  describe('filter record with special characters', () => {
+    let table: ITableFullVo;
+    let subTable: ITableFullVo;
+    beforeAll(async () => {
+      const newRecords = [...x_20.records];
+      newRecords.splice(
+        1,
+        3,
+        ...[
+          { fields: { [textField.name]: 'notepad++' } },
+          { fields: { [textField.name]: 'notepad++@' } },
+          { fields: { [textField.name]: 'notepad++@' } },
+        ]
+      );
+      table = await createTable(baseId, {
+        name: 'special_characters',
+        fields: x_20.fields,
+        records: newRecords,
+      });
+      const x20Link = x_20_link(table);
+      subTable = await createTable(baseId, {
+        name: 'lookup_filter_special_characters',
+        fields: x20Link.fields,
+        records: x20Link.records,
+      });
+
+      const x20LinkFromLookups = x_20_link_from_lookups(table, subTable.fields[2].id);
+      for (const field of x20LinkFromLookups.fields) {
+        await createField(subTable.id, field);
+      }
+
+      table.fields = (await getFields(table.id)).data;
+      subTable.fields = (await getFields(subTable.id)).data;
+    });
+    afterAll(async () => {
+      await permanentDeleteTable(baseId, table.id);
+      await permanentDeleteTable(baseId, subTable.id);
+    });
+
+    it('should filter record with special characters', async () => {
+      const linkField = subTable.fields.find((field) => field.type === FieldType.Link)!;
+      const { records } = await getFilterRecord(subTable.id, subTable.views[0].id, {
+        filterSet: [{ fieldId: linkField.id, value: 'notepad++', operator: 'contains' }],
+        conjunction: and.value,
+      });
+      expect(records.length).toBe(8);
     });
   });
 });

@@ -1,6 +1,6 @@
 import { FieldType } from '@teable/core';
 import type { ISelectFieldOptions, ISelectFieldChoice } from '@teable/core';
-import { ChevronDown, Minimize2, Pencil, Trash } from '@teable/icons';
+import { ChevronDown, Minimize2, Pencil, Trash2 } from '@teable/icons';
 import { generateLocalId } from '@teable/sdk/components';
 import { useTableId, useViewId } from '@teable/sdk/hooks';
 import {
@@ -11,9 +11,9 @@ import {
   DropdownMenuTrigger,
 } from '@teable/ui-lib';
 import { isEqual } from 'lodash';
+import { useTranslation } from 'next-i18next';
 import type { Dispatch, SetStateAction } from 'react';
 import { useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { useClickAway } from 'react-use';
 import { ChoiceItem } from '@/features/app/components/field-setting/options/SelectOptions';
 import { tableConfig } from '@/features/i18n/table.config';
@@ -68,15 +68,15 @@ export const KanbanStackHeader = (props: IKanbanStackHeaderProps) => {
 
   const onOptionUpdate = () => {
     const value = inputRef.current?.value;
-    const newChoice = { ...renamingChoice, name: value };
-    if (!value || isEqual(value, stackData)) return;
+    if (!value || !renamingChoice || isEqual(value, stackData)) return;
+    const newChoice: ISelectFieldChoice = { ...renamingChoice, name: value };
     const newChoices = choices.map((choice) => {
       if (choice.name === stackData) return newChoice;
       return choice;
     });
     stackField.convert({
       type,
-      options: { ...options, choices: newChoices },
+      options: { ...options, choices: newChoices } as ISelectFieldOptions,
     });
   };
 
@@ -92,7 +92,7 @@ export const KanbanStackHeader = (props: IKanbanStackHeaderProps) => {
     const newChoices = choices.filter((choice) => choice.name !== stackData);
     stackField.convert({
       type,
-      options: { ...options, choices: newChoices },
+      options: { ...options, choices: newChoices } as ISelectFieldOptions,
     });
   };
 
@@ -112,7 +112,7 @@ export const KanbanStackHeader = (props: IKanbanStackHeaderProps) => {
   });
 
   return (
-    <div className="flex h-12 w-full shrink-0 items-center justify-between rounded-t-md border-b bg-background px-4">
+    <div className="flex h-12 w-full shrink-0 items-center justify-between border-b bg-card px-4">
       {renamingChoice ? (
         <div ref={choiceRef}>
           <ChoiceItem
@@ -147,14 +147,14 @@ export const KanbanStackHeader = (props: IKanbanStackHeaderProps) => {
           }}
         >
           <DropdownMenuItem className="cursor-pointer" onClick={onStackCollapsed}>
-            <Minimize2 className="mr-2 size-4" />
+            <Minimize2 className="me-2 size-4" />
             {t('table:kanban.stackMenu.collapseStack')}
           </DropdownMenuItem>
           {isSingleSelectField && !isUncategorized && (
             <>
               {stackEditable && (
                 <DropdownMenuItem className="cursor-pointer" onClick={onStackRename}>
-                  <Pencil className="mr-2 size-4" />
+                  <Pencil className="me-2 size-4" />
                   {t('table:kanban.stackMenu.renameStack')}
                 </DropdownMenuItem>
               )}
@@ -165,7 +165,7 @@ export const KanbanStackHeader = (props: IKanbanStackHeaderProps) => {
                     className="cursor-pointer text-destructive focus:text-destructive"
                     onClick={onStackDelete}
                   >
-                    <Trash className="mr-2 size-4" />
+                    <Trash2 className="me-2 size-4" />
                     {t('table:kanban.stackMenu.deleteStack')}
                   </DropdownMenuItem>
                 </>

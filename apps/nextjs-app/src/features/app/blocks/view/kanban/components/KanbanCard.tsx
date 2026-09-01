@@ -1,18 +1,13 @@
 /* eslint-disable jsx-a11y/no-static-element-interactions,jsx-a11y/click-events-have-key-events */
 import type { DraggableProvided } from '@hello-pangea/dnd';
 import { FieldKeyType, type IAttachmentCellValue } from '@teable/core';
-import { ArrowDown, ArrowUp, Maximize2, Trash } from '@teable/icons';
+import { ArrowDown, ArrowUp, History, Link, Maximize2, MessageSquare } from '@teable/icons';
 import type { IRecordInsertOrderRo } from '@teable/openapi';
-import { createRecords, deleteRecord } from '@teable/openapi';
-import { CellValue, getFileCover } from '@teable/sdk/components';
+import { createRecords, deleteRecord, duplicateRecord } from '@teable/openapi';
+import { CellValue } from '@teable/sdk/components';
 import { useFieldStaticGetter, useTableId, useViewId } from '@teable/sdk/hooks';
 import type { Record } from '@teable/sdk/model';
 import {
-  Carousel,
-  CarouselContent,
-  CarouselItem,
-  CarouselNext,
-  CarouselPrevious,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -20,13 +15,16 @@ import {
   ContextMenuTrigger,
   cn,
 } from '@teable/ui-lib/shadcn';
+import { CopyPlus, Trash } from 'lucide-react';
+import { useTranslation } from 'next-i18next';
 import { useMemo } from 'react';
-import { useTranslation } from 'react-i18next';
 import { tableConfig } from '@/features/i18n/table.config';
+import { CardCarousel } from '../../gallery/components';
+import { useContextMenu } from '../../hooks/useContextMenu';
 import type { IKanbanContext } from '../context';
 import { useKanban } from '../hooks';
 import type { IStackData } from '../type';
-import { CARD_COVER_HEIGHT, getCellValueByStack } from '../utils';
+import { getCellValueByStack } from '../utils';
 
 interface IKanbanCardProps {
   stack: IStackData;
@@ -51,8 +49,10 @@ export const KanbanCard = (props: IKanbanCardProps) => {
     isFieldNameHidden,
     setExpandRecordId,
   } = useKanban() as Required<IKanbanContext>;
+  const { copyRecordUrl, viewRecordHistory, addRecordComment } = useContextMenu();
 
-  const { cardCreatable, cardDeletable } = permission;
+  const { cardCreatable, cardDeletable, cardEditable, cardCommentReadable, cardCommentCreatable } =
+    permission;
   const { id: fieldId } = stackField;
   const coverFieldId = coverField?.id;
   const coverCellValue = card.getCellValue(coverFieldId as string) as
@@ -60,10 +60,12 @@ export const KanbanCard = (props: IKanbanCardProps) => {
     | undefined;
 
   const titleComponent = useMemo(() => {
-    if (primaryField == null) return t('untitled');
+    if (primaryField == null) return <span className="text-muted-foreground">{t('untitled')}</span>;
     const value = card.getCellValue(primaryField.id);
-    if (value == null) return t('untitled');
-    return <CellValue field={primaryField} value={value} className="text-base" />;
+    if (value == null) return <span className="text-muted-foreground">{t('untitled')}</span>;
+    return (
+      <CellValue field={primaryField} value={value} className="text-base" ellipsis plainLongText />
+    );
   }, [card, primaryField, t]);
 
   const onExpand = () => {
@@ -73,6 +75,11 @@ export const KanbanCard = (props: IKanbanCardProps) => {
   const onDelete = () => {
     if (tableId == null) return;
     deleteRecord(tableId, card.id);
+  };
+
+  const onDuplicate = () => {
+    if (tableId == null || viewId == null) return;
+    duplicateRecord(tableId, card.id, { viewId, anchorId: card.id, position: 'after' });
   };
 
   const onInsert = async (position: IRecordInsertOrderRo['position']) => {
@@ -98,6 +105,20 @@ export const KanbanCard = (props: IKanbanCardProps) => {
     }
   };
 
+  const onCopyRecordUrl = async () => {
+    await copyRecordUrl(card.id);
+  };
+
+  const onViewRecordHistory = async () => {
+    setExpandRecordId(card.id);
+    await viewRecordHistory(card.id);
+  };
+
+  const onAddRecordComment = async () => {
+    setExpandRecordId(card.id);
+    await addRecordComment(card.id);
+  };
+
   return (
     <ContextMenu>
       <ContextMenuTrigger>
@@ -105,49 +126,31 @@ export const KanbanCard = (props: IKanbanCardProps) => {
           <div
             {...provided.dragHandleProps}
             className={cn(
-              'relative flex w-full grow flex-col space-y-2 overflow-hidden rounded-md border border-input bg-background p-3',
+              'relative flex w-full grow flex-col space-y-2  gap-1 overflow-hidden rounded-md border border-border bg-card hover:border-primary/15 p-3 cursor-pointer',
               isDragging && 'shadow-md'
             )}
             onClick={onExpand}
           >
             {coverCellValue?.length && (
-              <Carousel
-                opts={{
-                  watchDrag: false,
-                  watchResize: false,
-                  watchSlides: false,
-                }}
-              >
-                <CarouselContent className="ml-0">
-                  {coverCellValue.map(({ id, mimetype, presignedUrl, lgThumbnailUrl }) => {
-                    const url = lgThumbnailUrl ?? getFileCover(mimetype, presignedUrl);
-                    return (
-                      <CarouselItem
-                        key={id}
-                        style={{ height: CARD_COVER_HEIGHT }}
-                        className="relative w-full pl-0"
-                      >
-                        <img
-                          src={url}
-                          alt="card cover"
-                          style={{
-                            objectFit: isCoverFit ? 'contain' : 'cover',
-                            width: '100%',
-                            height: '100%',
-                          }}
-                        />
-                      </CarouselItem>
-                    );
-                  })}
-                </CarouselContent>
-                <CarouselPrevious className="left-1" onClick={(e) => e.stopPropagation()} />
-                <CarouselNext className="right-1" onClick={(e) => e.stopPropagation()} />
-              </Carousel>
+              <CardCarousel value={coverCellValue} isCoverFit={isCoverFit} />
             )}
             <div className="text-base font-semibold">{titleComponent}</div>
             {displayFields.map((field) => {
-              const { id: fieldId, name, type, isLookup } = field;
-              const { Icon } = getFieldStatic(type, isLookup);
+              const {
+                id: fieldId,
+                name,
+                type,
+                isLookup,
+                isConditionalLookup,
+                aiConfig,
+                canReadFieldRecord,
+              } = field;
+              const { Icon } = getFieldStatic(type, {
+                isLookup,
+                isConditionalLookup,
+                hasAiConfig: Boolean(aiConfig),
+                deniedReadRecord: !canReadFieldRecord,
+              });
               const cellValue = card.getCellValue(fieldId);
 
               if (cellValue == null) return null;
@@ -155,12 +158,12 @@ export const KanbanCard = (props: IKanbanCardProps) => {
               return (
                 <div key={fieldId}>
                   {!isFieldNameHidden && (
-                    <div className="mb-1 flex items-center space-x-1 text-slate-500 dark:text-slate-400">
-                      <Icon className="text-sm" />
+                    <div className="mb-1 flex items-center space-x-1 text-muted-foreground rtl:space-x-reverse">
+                      <Icon className="size-4 text-sm" />
                       <span className="text-xs">{name}</span>
                     </div>
                   )}
-                  <CellValue field={field} value={cellValue} maxLine={4} />
+                  <CellValue field={field} value={cellValue} ellipsis plainLongText />
                 </div>
               );
             })}
@@ -171,25 +174,47 @@ export const KanbanCard = (props: IKanbanCardProps) => {
         {cardCreatable && (
           <>
             <ContextMenuItem onClick={() => onInsert('before')}>
-              <ArrowUp className="mr-2 size-4" />
+              <ArrowUp className="size-4" />
               {t('table:kanban.cardMenu.insertCardAbove')}
             </ContextMenuItem>
             <ContextMenuItem onClick={() => onInsert('after')}>
-              <ArrowDown className="mr-2 size-4" />
+              <ArrowDown className="size-4" />
               {t('table:kanban.cardMenu.insertCardBelow')}
             </ContextMenuItem>
             <ContextMenuSeparator />
+            <ContextMenuItem onClick={onDuplicate}>
+              <CopyPlus className="size-4" />
+              {t('table:kanban.cardMenu.duplicateCard')}
+            </ContextMenuItem>
           </>
         )}
         <ContextMenuItem onClick={onExpand}>
-          <Maximize2 className="mr-2 size-4" />
+          <Maximize2 className="size-4" />
           {t('table:kanban.cardMenu.expandCard')}
         </ContextMenuItem>
-        {cardDeletable && (
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={onCopyRecordUrl}>
+          <Link className="size-4" />
+          {t('sdk:expandRecord.copyRecordUrl')}
+        </ContextMenuItem>
+        {cardEditable && (
+          <ContextMenuItem onClick={onViewRecordHistory}>
+            <History className="size-4" />
+            {t('sdk:expandRecord.viewRecordHistory')}
+          </ContextMenuItem>
+        )}
+        {cardCommentReadable && (
+          <ContextMenuItem onClick={onAddRecordComment}>
+            <MessageSquare className="size-4" />
+            {/* read-only collaborators open the thread, they just can't add to it */}
+            {cardCommentCreatable ? t('sdk:expandRecord.addRecordComment') : t('sdk:comment.title')}
+          </ContextMenuItem>
+        )}
+        {cardDeletable && !card.undeletable && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem className="text-destructive focus:text-destructive" onClick={onDelete}>
-              <Trash className="mr-2 size-4" />
+              <Trash className="size-4" />
               {t('table:kanban.cardMenu.deleteCard')}
             </ContextMenuItem>
           </>

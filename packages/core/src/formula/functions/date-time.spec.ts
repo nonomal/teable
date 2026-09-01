@@ -1,6 +1,7 @@
 /* eslint-disable sonarjs/no-duplicate-string */
 import type { IRecord } from '../../models';
 import { CellValueType } from '../../models/field/constant';
+import type { FieldCore } from '../../models/field/field';
 import { TypedValue } from '../typed-value';
 import {
   CreatedTime,
@@ -11,6 +12,7 @@ import {
   DatetimeParse,
   Day,
   FromNow,
+  ToNow,
   Hour,
   IsAfter,
   IsBefore,
@@ -34,9 +36,14 @@ describe('DateTime', () => {
     const todayFunc = new Today();
 
     it('should return the current date', () => {
-      const result = todayFunc.eval();
+      const timeZone = 'America/Los_Angeles';
+      const result = todayFunc.eval([], {
+        record: {} as IRecord,
+        dependencies: {},
+        timeZone,
+      });
 
-      expect(result).toBe(dayjs().startOf('d').toISOString());
+      expect(result).toBe(dayjs().tz(timeZone).startOf('d').toISOString());
     });
   });
 
@@ -508,7 +515,7 @@ describe('DateTime', () => {
     const startDate = new Date('2022-08-01T16:30:00.000Z').toISOString();
     const endDate = new Date('2023-09-08T19:20:00.000Z').toISOString();
 
-    it('should return the difference in day between two dates by default', () => {
+    it('should return the difference in seconds between two dates by default', () => {
       expect(
         datetimeDiffFunc.eval(
           [
@@ -521,7 +528,7 @@ describe('DateTime', () => {
             timeZone: 'America/Los_Angeles',
           }
         )
-      ).toBe(403);
+      ).toBe(-34829400);
 
       expect(
         datetimeDiffFunc.eval(
@@ -543,7 +550,7 @@ describe('DateTime', () => {
             timeZone: 'America/Los_Angeles',
           }
         )
-      ).toBe(1);
+      ).toBe(86400);
     });
 
     it('should return the difference in years between two dates', () => {
@@ -560,7 +567,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBe(1);
+      expect(result).toBe(-1);
     });
 
     it('should return the difference in months between two dates', () => {
@@ -577,7 +584,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBe(13);
+      expect(result).toBe(-13);
     });
 
     it('should return the difference in days between two dates', () => {
@@ -594,7 +601,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBe(403);
+      expect(result).toBe(-403);
     });
 
     it('should return the difference in hours between two dates', () => {
@@ -611,7 +618,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBe(9674);
+      expect(result).toBe(-9674);
     });
 
     it('should return the difference in minutes between two dates', () => {
@@ -628,7 +635,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBe(580490);
+      expect(result).toBe(-580490);
     });
 
     it('should return the difference in seconds between two dates', () => {
@@ -645,7 +652,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBe(34829400);
+      expect(result).toBe(-34829400);
     });
 
     it('should return an approximate difference in months between two dates', () => {
@@ -663,7 +670,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBeCloseTo(13.23, 2);
+      expect(result).toBeCloseTo(-13.23, 2);
     });
   });
 
@@ -783,11 +790,11 @@ describe('DateTime', () => {
       expect(result).toBe(73);
     });
 
-    it('should accurately return the workday difference for short date ranges', () => {
+    it('should exclude the start date when calculating forward workday ranges', () => {
       const result = workdayDiffFunc.eval(
         [
-          new TypedValue(new Date('2023-09-05').toISOString(), CellValueType.DateTime, false),
-          new TypedValue(new Date('2023-09-11').toISOString(), CellValueType.DateTime, false),
+          new TypedValue(new Date('2026-02-23').toISOString(), CellValueType.DateTime, false),
+          new TypedValue(new Date('2026-02-27').toISOString(), CellValueType.DateTime, false),
         ],
         {
           record: {} as IRecord,
@@ -796,7 +803,7 @@ describe('DateTime', () => {
         }
       );
 
-      expect(result).toBe(5);
+      expect(result).toBe(4);
     });
   });
 
@@ -1192,6 +1199,22 @@ describe('DateTime', () => {
         dayjs.tz('8 Sep 2023 18:00', 'D MMM YYYY HH:mm', 'America/Los_Angeles').toISOString()
       );
     });
+
+    it('reparses datetime inputs through the provided format before returning an ISO string', () => {
+      const result = datetimeParseFunc.eval(
+        [
+          new TypedValue('2025-01-05T00:00:00.000Z', CellValueType.DateTime, false),
+          new TypedValue('MMYYYY', CellValueType.String, false),
+        ],
+        {
+          record: {} as IRecord,
+          dependencies: {},
+          timeZone: 'UTC',
+        }
+      );
+
+      expect(result).toBe('2025-01-01T00:00:00.000Z');
+    });
   });
 
   describe('CreatedTime', () => {
@@ -1234,6 +1257,241 @@ describe('DateTime', () => {
       const result = lastModifiedTimeFunc.eval([], context);
 
       expect(result).toBe(date);
+    });
+
+    it('should allow a field reference parameter', () => {
+      const mockField = { id: 'fldTracked' } as unknown as FieldCore;
+      const fieldParam = new TypedValue('ignored', CellValueType.String, false, mockField);
+      const result = lastModifiedTimeFunc.eval([fieldParam], context);
+
+      expect(result).toBe(date);
+    });
+
+    it('should allow multiple field reference parameters', () => {
+      const fieldA = { id: 'fldA' } as unknown as FieldCore;
+      const fieldB = { id: 'fldB' } as unknown as FieldCore;
+      const fieldParams = [
+        new TypedValue('ignored', CellValueType.String, false, fieldA),
+        new TypedValue('ignored', CellValueType.Number, false, fieldB),
+      ];
+
+      const result = lastModifiedTimeFunc.eval(fieldParams, context);
+
+      expect(result).toBe(date);
+    });
+
+    it('should throw when the parameter is not a field reference', () => {
+      const literalParam = new TypedValue('2023-09-08', CellValueType.String, false);
+
+      expect(() => lastModifiedTimeFunc.eval([literalParam], context)).toThrow(
+        'LAST_MODIFIED_TIME parameter must be a field reference'
+      );
+    });
+
+    it('should throw when any parameter is not a field reference', () => {
+      const mockField = { id: 'fldTracked' } as unknown as FieldCore;
+      const fieldParam = new TypedValue('ignored', CellValueType.String, false, mockField);
+      const literalParam = new TypedValue('bad', CellValueType.String, false);
+
+      expect(() => lastModifiedTimeFunc.eval([fieldParam, literalParam], context)).toThrow(
+        'LAST_MODIFIED_TIME parameter must be a field reference'
+      );
+    });
+  });
+
+  describe('DateAdd permutations', () => {
+    const context = {
+      record: {} as IRecord,
+      dependencies: {},
+      timeZone: 'UTC',
+    };
+    const baseDateIso = '2025-01-01T00:00:00.000Z';
+    const baseNumberValue = 3;
+    const dateAddFunc = new DateAdd();
+    const baseDate = new TypedValue(baseDateIso, CellValueType.DateTime, false);
+    const unitDay = new TypedValue('day', CellValueType.String, false);
+
+    const literalCount = new TypedValue(1, CellValueType.Number, false);
+    const fieldCount = new TypedValue(baseNumberValue, CellValueType.Number, false);
+    const formulaCount = new TypedValue(baseNumberValue * 2, CellValueType.Number, false);
+
+    [
+      { label: 'literal numeric count', count: literalCount, expectedOffset: 1 },
+      { label: 'number field count', count: fieldCount, expectedOffset: baseNumberValue },
+      {
+        label: 'numeric formula field count',
+        count: formulaCount,
+        expectedOffset: baseNumberValue * 2,
+      },
+    ].forEach(({ label, count, expectedOffset }) => {
+      it(`should add days when count argument comes from ${label}`, () => {
+        const result = dateAddFunc.eval([baseDate, count, unitDay], context);
+
+        expect(typeof result).toBe('string');
+        const expectedIso = dayjs(baseDateIso).add(expectedOffset, 'day').toISOString();
+        expect(result).toBe(expectedIso);
+      });
+    });
+  });
+
+  describe('DatetimeParse permutations', () => {
+    const context = {
+      record: {} as IRecord,
+      dependencies: {},
+      timeZone: 'UTC',
+    };
+    const datetimeParseFunc = new DatetimeParse();
+
+    it('should parse ISO strings from text literals', () => {
+      const textIso = '2025-05-04T12:34:56Z';
+      const result = datetimeParseFunc.eval(
+        [
+          new TypedValue(textIso, CellValueType.String, false),
+          new TypedValue('YYYY-MM-DDTHH:mm:ss[Z]', CellValueType.String, false),
+        ],
+        context
+      );
+
+      expect(result).toBe(dayjs(textIso).toISOString());
+    });
+
+    it('should parse ISO strings from formula text output', () => {
+      const formulaIso = '2024-12-31T00:00:00Z';
+      const result = datetimeParseFunc.eval(
+        [
+          new TypedValue(formulaIso, CellValueType.String, false),
+          new TypedValue('YYYY-MM-DD[T]HH:mm:ss[Z]', CellValueType.String, false),
+        ],
+        context
+      );
+
+      expect(result).toBe(dayjs(formulaIso).toISOString());
+    });
+  });
+
+  describe('FromNow / ToNow permutations', () => {
+    const context = {
+      record: {} as IRecord,
+      dependencies: {},
+      timeZone: 'UTC',
+    };
+    const fromNowFunc = new FromNow();
+    const toNowFunc = new ToNow();
+
+    it('should evaluate FROMNOW using literal offsets', () => {
+      const targetIso = dayjs().subtract(5, 'day').toISOString();
+      const result = fromNowFunc.eval(
+        [
+          new TypedValue(targetIso, CellValueType.DateTime, false),
+          new TypedValue('day', CellValueType.String, false),
+          new TypedValue(true, CellValueType.Boolean, false),
+        ],
+        context
+      );
+
+      const expectedDiff = Math.abs(dayjs().diff(dayjs(targetIso), 'day', true));
+      expect(typeof result).toBe('number');
+      expect(Math.abs((result as number) - expectedDiff)).toBeLessThan(0.05);
+    });
+
+    it('should evaluate TONOW using literal offsets', () => {
+      const targetIso = dayjs().add(2, 'day').toISOString();
+      const result = toNowFunc.eval(
+        [
+          new TypedValue(targetIso, CellValueType.DateTime, false),
+          new TypedValue('day', CellValueType.String, false),
+          new TypedValue(true, CellValueType.Boolean, false),
+        ],
+        context
+      );
+
+      const expectedDiff = Math.abs(dayjs(targetIso).diff(dayjs(), 'day', true));
+      expect(typeof result).toBe('number');
+      expect(Math.abs((result as number) - expectedDiff)).toBeLessThan(0.05);
+    });
+  });
+
+  describe('WorkdayDiff permutations', () => {
+    const context = {
+      record: {} as IRecord,
+      dependencies: {},
+      timeZone: 'UTC',
+    };
+    const workdayDiffFunc = new WorkdayDiff();
+    const workdayFunc = new Workday();
+
+    it('should calculate workday difference with literal holidays', () => {
+      const start = new TypedValue('2025-01-01T00:00:00.000Z', CellValueType.DateTime, false);
+      const end = new TypedValue('2025-01-10T00:00:00.000Z', CellValueType.DateTime, false);
+      const holidays = new TypedValue('2025-01-06', CellValueType.String, false);
+
+      const result = workdayDiffFunc.eval([start, end, holidays], context);
+
+      expect(result).toBe(6);
+    });
+
+    it('should return a negative count for reverse workday ranges', () => {
+      const start = new TypedValue('2026-03-02T00:00:00.000Z', CellValueType.DateTime, false);
+      const end = new TypedValue('2026-02-23T00:00:00.000Z', CellValueType.DateTime, false);
+
+      const result = workdayDiffFunc.eval([start, end], context);
+
+      expect(result).toBe(-5);
+    });
+
+    it('should stay inverse to WORKDAY for business-day offsets', () => {
+      const start = new TypedValue('2026-02-23T00:00:00.000Z', CellValueType.DateTime, false);
+      const offset = new TypedValue(5, CellValueType.Number, false);
+      const end = workdayFunc.eval([start, offset], context);
+
+      expect(end).toBeTruthy();
+      if (end == null) return;
+
+      const result = workdayDiffFunc.eval(
+        [start, new TypedValue(end, CellValueType.DateTime, false)],
+        context
+      );
+
+      expect(result).toBe(5);
+    });
+  });
+
+  describe('CreatedTime / LastModifiedTime permutations', () => {
+    const created = '2025-02-01T00:00:00.000Z';
+    const modified = '2025-02-02T12:00:00.000Z';
+    const record: IRecord = {
+      id: 'recMatrix',
+      fields: {},
+      createdTime: created,
+      lastModifiedTime: modified,
+    };
+    const context = {
+      record,
+      dependencies: {},
+      timeZone: 'UTC',
+    };
+    const createdTimeFunc = new CreatedTime();
+    const lastModifiedTimeFunc = new LastModifiedTime();
+    const datetimeDiffFunc = new DatetimeDiff();
+
+    it('should evaluate chained formulas using created and last modified timestamps', () => {
+      const createdTime = createdTimeFunc.eval([], context);
+      const lastModifiedTime = lastModifiedTimeFunc.eval([], context);
+
+      expect(createdTime).toBe(created);
+      expect(lastModifiedTime).toBe(modified);
+
+      const diff = datetimeDiffFunc.eval(
+        [
+          new TypedValue(lastModifiedTime, CellValueType.DateTime, false),
+          new TypedValue(createdTime, CellValueType.DateTime, false),
+          new TypedValue('hour', CellValueType.String, false),
+        ],
+        context
+      );
+
+      expect(typeof diff).toBe('number');
+      expect(diff as number).toBeCloseTo(36, 6);
     });
   });
 });

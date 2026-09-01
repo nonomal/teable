@@ -15,10 +15,11 @@ export const getPluginsVoSchema = z.array(
     logo: z.string(),
     url: z.string().optional(),
     helpUrl: z.string().optional(),
-    positions: z.array(z.nativeEnum(PluginPosition)),
+    positions: z.array(z.enum(PluginPosition)),
     i18n: pluginI18nSchema,
-    status: z.nativeEnum(PluginStatus),
+    status: z.enum(PluginStatus),
     pluginUser: pluginUserSchema,
+    isSystem: z.boolean().optional(),
     createdTime: z.string(),
     lastModifiedTime: z.string(),
   })

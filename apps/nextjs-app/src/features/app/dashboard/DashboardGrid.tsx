@@ -20,6 +20,7 @@ export const DashboardGrid = (props: { dashboardId: string }) => {
   const isExpandPlugin = useIsExpandPlugin();
   const { t } = useTranslation(dashboardConfig.i18nNamespaces);
   const [isDragging, setIsDragging] = useState(false);
+  const [isSmallScreen, setIsSmallScreen] = useState(false);
   const basePermissions = useBasePermission();
   const canMange = basePermissions?.['base|update'];
   const { data: dashboardData } = useQuery({
@@ -30,7 +31,7 @@ export const DashboardGrid = (props: { dashboardId: string }) => {
   const { mutate: updateLayoutDashboardMutate } = useMutation({
     mutationFn: (layout: IDashboardLayout) => updateLayoutDashboard(baseId, dashboardId, layout),
     onSuccess: () => {
-      queryClient.invalidateQueries(ReactQueryKeys.getDashboard(dashboardId));
+      queryClient.invalidateQueries({ queryKey: ReactQueryKeys.getDashboard(dashboardId) });
     },
   });
 
@@ -59,7 +60,7 @@ export const DashboardGrid = (props: { dashboardId: string }) => {
       rowHeight={80}
       margin={[16, 16]}
       containerPadding={[16, 16]}
-      cols={{ lg: 12, md: 10, sm: 6, xs: 4, xxs: 2 }}
+      cols={{ lg: 12, md: 12, sm: 12, xs: 1, xxs: 1 }}
       draggableHandle=".dashboard-draggable-handle"
       onResize={() => setIsDragging(true)}
       onResizeStop={(layout) => {
@@ -71,8 +72,15 @@ export const DashboardGrid = (props: { dashboardId: string }) => {
         setIsDragging(false);
         onLayoutChange(layout);
       }}
-      isResizable={canMange}
-      isDraggable={canMange}
+      isResizable={canMange && !isSmallScreen}
+      isDraggable={canMange && !isSmallScreen}
+      onWidthChange={(containerWidth) => {
+        if (containerWidth < 768) {
+          setIsSmallScreen(true);
+        } else {
+          setIsSmallScreen(false);
+        }
+      }}
     >
       {layout.map(({ pluginInstallId, x, y, w, h }) => (
         <div

@@ -1,8 +1,14 @@
 /* eslint-disable sonarjs/no-duplicate-string */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { plainToInstance } from 'class-transformer';
+import { DateFormattingPreset, TimeFormatting } from '../models';
 import { CellValueType, DbFieldType, FieldType } from '../models/field/constant';
-import { LinkFieldCore, FormulaFieldCore, NumberFieldCore } from '../models/field/derivate';
+import {
+  LinkFieldCore,
+  FormulaFieldCore,
+  NumberFieldCore,
+  DateFieldCore,
+} from '../models/field/derivate';
 import type { FieldCore } from '../models/field/field';
 import type { IRecord } from '../models/record';
 import { evaluate } from './evaluate';
@@ -15,6 +21,7 @@ describe('EvalVisitor', () => {
       fldNumber: 8,
       fldMultipleNumber: [1, 2, 3],
       fldMultipleLink: [{ id: 'recxxxxxxx' }, { id: 'recyyyyyyy', title: 'A2' }],
+      fldDate: new Date('2024-01-01'),
     },
     createdTime: new Date().toISOString(),
   };
@@ -29,6 +36,21 @@ describe('EvalVisitor', () => {
         precision: 2,
       },
       cellValueType: CellValueType.Number,
+    };
+
+    const dateFieldJson = {
+      id: 'fldDate',
+      name: 'fldDateName',
+      description: 'A test date field',
+      type: FieldType.Date,
+      options: {
+        formatting: {
+          date: DateFormattingPreset.ISO,
+          time: TimeFormatting.None,
+          timeZone: 'Asia/Shanghai',
+        },
+      },
+      cellValueType: CellValueType.DateTime,
     };
 
     const multipleNumberFieldJson = {
@@ -58,10 +80,12 @@ describe('EvalVisitor', () => {
     const numberField = plainToInstance(NumberFieldCore, numberFieldJson);
     const multipleNumberField = plainToInstance(NumberFieldCore, multipleNumberFieldJson);
     const multipleLinkField = plainToInstance(LinkFieldCore, multipleLinkFieldJson);
+    const dateField = plainToInstance(DateFieldCore, dateFieldJson);
     fieldContext = {
       [numberField.id]: numberField,
       [multipleNumberField.id]: multipleNumberField,
       [multipleLinkField.id]: multipleLinkField,
+      [dateField.id]: dateField,
     };
   });
 
@@ -172,6 +196,33 @@ describe('EvalVisitor', () => {
     expect(evalFormula('1 != 2')).toBe(true);
   });
 
+  it('does not treat numeric zero as blank in equality comparisons', () => {
+    const zeroRecord: IRecord = {
+      ...record,
+      fields: {
+        ...record.fields,
+        fldNumber: 0,
+      },
+    };
+    const blankRecord: IRecord = {
+      ...record,
+      fields: {
+        ...record.fields,
+        fldNumber: null,
+      },
+    };
+
+    expect(evalFormula('0 = BLANK()')).toBe(false);
+    expect(evalFormula('BLANK() = 0')).toBe(false);
+    expect(evalFormula('0 != BLANK()')).toBe(true);
+    expect(evalFormula('{fldNumber} = BLANK()', fieldContext, zeroRecord)).toBe(false);
+    expect(evalFormula('{fldNumber} != BLANK()', fieldContext, zeroRecord)).toBe(true);
+    expect(
+      evalFormula('IF({fldNumber} = BLANK(), "empty", "not empty")', fieldContext, zeroRecord)
+    ).toBe('not empty');
+    expect(evalFormula('{fldNumber} = BLANK()', fieldContext, blankRecord)).toBe(true);
+  });
+
   it('parentheses', () => {
     expect(evalFormula('(3 + 5) * 2')).toBe(16);
   });
@@ -188,6 +239,30 @@ describe('EvalVisitor', () => {
 
   it('function call', () => {
     expect(evalFormula('sum({fldNumber}, 1, 2, 3)', fieldContext, record)).toBe(14);
+  });
+
+  it('matches numeric field values stored as strings in SWITCH cases', () => {
+    const numericStringRecord: IRecord = {
+      ...record,
+      fields: {
+        ...record.fields,
+        fldNumber: '30',
+      },
+    };
+
+    expect(evalFormula('IF({fldNumber}=30,20,0)', fieldContext, numericStringRecord)).toBe(20);
+    expect(
+      evalFormula('SWITCH({fldNumber},30,20,45,30,60,40,0)', fieldContext, numericStringRecord)
+    ).toBe(20);
+  });
+
+  it('evaluates TEXTBEFORE and TEXTSPLIT function calls', () => {
+    expect(evalFormula('TEXTBEFORE("20, 04, 79", ",")', fieldContext, record)).toBe('20');
+    expect(evalFormula('TEXTSPLIT("20, 04, 79", ",")', fieldContext, record)).toEqual([
+      '20',
+      ' 04',
+      ' 79',
+    ]);
   });
 
   it('rollup call', () => {
@@ -218,6 +293,10 @@ describe('EvalVisitor', () => {
 
   it('should throw exception', () => {
     expect(() => evalFormula('{}', fieldContext, record)).toThrowError();
+  });
+
+  it('should calculate date field when value type is Date', () => {
+    expect(evalFormula('{fldDate}', fieldContext, record)).toEqual('2024-01-01');
   });
 
   it('should calculate multiple number field', () => {

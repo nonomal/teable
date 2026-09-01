@@ -1,6 +1,5 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
 import { axios } from '../axios';
-import { getRecordsRoSchema } from '../record';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
 
@@ -19,8 +18,8 @@ export const GetRecordCommentCountRoute: RouteConfig = registerRoute({
   request: {
     params: z.object({
       tableId: z.string(),
+      recordId: z.string(),
     }),
-    query: getRecordsRoSchema,
   },
   responses: {
     200: {

@@ -9,20 +9,19 @@ export const DefaultList = (props: IFilterLinkSelectListProps) => {
   const { field, value, onClick } = props;
   const { t } = useTranslation();
 
-  const isSingle = typeof value === 'string';
-  const values = isSingle ? [value] : value;
+  const values = typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
 
   return (
     <LinkViewProvider linkFieldId={field.id} fallback={<h1>{t('common.empty')}</h1>}>
       <LinkFilterProvider filterLinkCellSelected={field.id}>
         <RowCountProvider>
           <SocketRecordList
-            selectedRecordIds={values || undefined}
+            selectedRecordIds={values.length ? values : undefined}
             onClick={(value) => {
               onClick(value.id);
               StorageLinkSelected.set(`${field.options.foreignTableId}-${value.id}`, value.title);
             }}
-            primaryFieldId={field.options.lookupFieldId}
+            lookupFieldId={field.options.lookupFieldId}
           />
         </RowCountProvider>
       </LinkFilterProvider>

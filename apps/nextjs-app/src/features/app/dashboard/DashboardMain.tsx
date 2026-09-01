@@ -35,7 +35,7 @@ export const DashboardMain = (props: { dashboardId: string }) => {
         {canManage && (
           <AddPluginDialog dashboardId={dashboardId}>
             <Button size={'xs'}>
-              <Plus />
+              <Plus className="size-4 shrink-0" />
               {t('dashboard:addPlugin')}
             </Button>
           </AddPluginDialog>
@@ -44,7 +44,7 @@ export const DashboardMain = (props: { dashboardId: string }) => {
     );
   }
   return (
-    <div className="flex-1 overflow-y-scroll p-4">
+    <div className="flex-1 overflow-y-auto p-4">
       <DashboardGrid dashboardId={dashboardId} />
     </div>
   );

@@ -1,13 +1,13 @@
 import { CommentNodeType } from '@teable/openapi';
 import type { ICommentContent } from '@teable/openapi';
-import type { TElement, TDescendant } from '@udecode/plate-common';
+import type { TElement, Descendant } from '@udecode/plate';
 import { size, has } from 'lodash';
 
 export const hasOnlyProperty = (obj: Record<string, unknown>, propertyName: string) => {
   return size(obj) === 1 && has(obj, propertyName);
 };
 
-export const isTextCommentNode = (element: TDescendant) => {
+export const isTextCommentNode = (element: Descendant) => {
   return hasOnlyProperty(element, 'text') && !!element.text;
 };
 
@@ -22,6 +22,7 @@ export class EditorTransform {
 
     return value.map((element) => {
       if (element.type === CommentNodeType.Img) {
+        console.log('element', element);
         return {
           type: CommentNodeType.Img,
           path: element.path,
@@ -42,9 +43,10 @@ export class EditorTransform {
                 };
               }
               if (child.type === CommentNodeType.Mention) {
+                console.log('childchildchildchildchild', child);
                 return {
                   type: CommentNodeType.Mention,
-                  value: child.value,
+                  value: (child.value as { id: string }).id,
                 };
               }
 
@@ -76,6 +78,7 @@ export class EditorTransform {
         return {
           type: CommentNodeType.Img,
           path: element.path,
+          url: element.url,
           width: element.width,
           children: [{ text: '' }],
         } as TElement;
@@ -91,7 +94,11 @@ export class EditorTransform {
               }
               case CommentNodeType.Mention: {
                 return {
-                  value: child.value,
+                  value: {
+                    id: child.value,
+                    name: child.name,
+                    avatar: child.avatar,
+                  },
                   children: [{ text: '' }],
                   type: CommentNodeType.Mention,
                 };

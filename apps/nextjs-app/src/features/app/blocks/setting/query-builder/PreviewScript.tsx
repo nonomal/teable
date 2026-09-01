@@ -8,6 +8,8 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import { CopyButton } from '@/features/app/components/CopyButton';
 import { developerConfig } from '@/features/i18n/developer.config';
+import { generateCurlCode, generateJavaScriptCode, generatePythonCode } from './codeGenerators';
+import { useTransformFieldKey } from './useTransformFieldKey';
 
 export const CodeBlock = ({
   code,
@@ -19,7 +21,7 @@ export const CodeBlock = ({
   language?: string;
 }) => (
   <div className={cn('relative', className)}>
-    <CopyButton text={code} className="absolute right-4 top-4" />
+    <CopyButton text={code} className="absolute end-4 top-4" />
     <SyntaxHighlighter
       language={language}
       style={vscDarkPlus}
@@ -65,108 +67,6 @@ const LanguageSelector = ({
   </ToggleGroup>
 );
 
-const generateCurlCode = (endpoint: string, params: Record<string, unknown>, token: string) => {
-  const queryParams = new URLSearchParams();
-  Object.entries(params)
-    .filter(([_, value]) => value != null)
-    .forEach(([key, value]) => {
-      if (Array.isArray(value)) {
-        value.forEach((item) => queryParams.append(key, item.toString()));
-      } else if (key === 'filter' || key === 'orderBy') {
-        queryParams.append(key, JSON.stringify(value));
-      } else {
-        queryParams.append(key, value as string);
-      }
-    });
-  const queryString = queryParams.toString();
-  const url = `${endpoint}${queryString ? `?${queryString}` : ''}`;
-  return `curl -X GET \\
-  "${url}" \\
-  -H "Authorization: Bearer ${token || 'YOUR_API_TOKEN'}" \\
-  -H "Accept: application/json"`;
-};
-
-const generateJavaScriptCode = (
-  endpoint: string,
-  params: Record<string, unknown>,
-  token: string
-) => {
-  const paramEntries = Object.entries(params).filter(([_, value]) => value != null);
-
-  const paramStrings = paramEntries.map(([key, value]) => {
-    if (key === 'filter' || key === 'orderBy') {
-      return `  ${key}: JSON.stringify(${JSON.stringify(value)})`;
-    }
-    return `  ${key}: ${JSON.stringify(value)}`;
-  });
-
-  const paramsCode =
-    paramStrings.length > 0
-      ? `const params = {
-${paramStrings.join(',\n')}
-};`
-      : '';
-
-  const urlParamsCode =
-    paramStrings.length > 0
-      ? `
-Object.entries(params).forEach(([key, value]) => {
-  url.searchParams.append(key, value);
-});`
-      : '';
-
-  return `
-const url = new URL("${endpoint}");
-${paramsCode}
-${urlParamsCode}
-
-fetch(url, {
-  method: "GET",
-  headers: {
-    "Authorization": "Bearer ${token || 'YOUR_API_TOKEN'}",
-    "Accept": "application/json"
-  }
-})
-.then(response => response.json())
-.then(data => console.log(data))
-.catch(error => console.error('Error:', error));
-`.slice(1);
-};
-
-const generatePythonCode = (endpoint: string, params: Record<string, unknown>, token: string) => {
-  const paramEntries = Object.entries(params).filter(([_, value]) => value != null);
-
-  const paramStrings = paramEntries.map(([key, value]) => {
-    if (key === 'filter' || key === 'orderBy') {
-      return `    "${key}": json.dumps(${JSON.stringify(value)})`;
-    }
-    return `    "${key}": ${JSON.stringify(value)}`;
-  });
-
-  const paramsCode =
-    paramStrings.length > 0
-      ? `params = {
-${paramStrings.join(',\n')}
-}`
-      : '';
-
-  return `
-import requests
-import json
-
-url = "${endpoint}"
-${paramsCode}
-
-headers = {
-    "Authorization": "Bearer ${token || 'YOUR_API_TOKEN'}",
-    "Accept": "application/json"
-}
-
-response = requests.get(url${paramsCode ? ', params=params' : ''}, headers=headers)
-print(response.json())
-`.slice(1);
-};
-
 interface QueryParamsTableProps {
   query: IGetRecordsRo;
 }
@@ -183,8 +83,8 @@ export const QueryParamsTable: React.FC<QueryParamsTableProps> = ({ query }) => 
     <table className="w-full border-collapse">
       <thead>
         <tr>
-          <th className="w-60 border p-2 text-left">Key</th>
-          <th className="border p-2 text-left">Value</th>
+          <th className="w-60 border p-2 text-start">Key</th>
+          <th className="border p-2 text-start">Value</th>
         </tr>
       </thead>
       <tbody>
@@ -205,7 +105,7 @@ export const QueryParamsTable: React.FC<QueryParamsTableProps> = ({ query }) => 
 
 export const PreviewScript = ({
   tableId,
-  query,
+  query: queryRaw,
 }: {
   tableId: string;
   token?: string;
@@ -213,6 +113,7 @@ export const PreviewScript = ({
 }) => {
   const { t } = useTranslation(developerConfig.i18nNamespaces);
   const [currentUrl, setCurrentUrl] = useState('');
+  const query = useTransformFieldKey()(queryRaw);
 
   useEffect(() => {
     if (process) {

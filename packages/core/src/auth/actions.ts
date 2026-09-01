@@ -9,8 +9,11 @@ export enum ActionPrefix {
   Record = 'record',
   Field = 'field',
   Automation = 'automation',
+  App = 'app',
   User = 'user',
   TableRecordHistory = 'table_record_history',
+  Instance = 'instance',
+  Enterprise = 'enterprise',
 }
 
 export const spaceActions = [
@@ -29,6 +32,7 @@ export const baseActions = [
   'base|create',
   'base|delete',
   'base|read',
+  'base|read_all',
   'base|update',
   'base|invite_email',
   'base|invite_link',
@@ -48,6 +52,11 @@ export const tableActions = [
   'table|update',
   'table|import',
   'table|export',
+  'table|trash_read',
+  'table|trash_update',
+  'table|trash_reset',
+  'table|archive_read',
+  'table|archive_manage',
 ] as const;
 export const tableActionSchema = z.enum(tableActions);
 export type TableAction = z.infer<typeof tableActionSchema>;
@@ -72,6 +81,8 @@ export const recordActions = [
   'record|read',
   'record|update',
   'record|comment',
+  'record|copy',
+  'record|archive',
 ] as const;
 export const recordActionSchema = z.enum(recordActions);
 export type RecordAction = z.infer<typeof recordActionSchema>;
@@ -85,13 +96,25 @@ export const automationActions = [
 export const automationActionSchema = z.enum(automationActions);
 export type AutomationAction = z.infer<typeof automationActionSchema>;
 
-export const userActions = ['user|email_read'] as const;
+export const appActions = ['app|create', 'app|delete', 'app|read', 'app|update'] as const;
+export const appActionSchema = z.enum(appActions);
+export type AppAction = z.infer<typeof appActionSchema>;
+
+export const userActions = ['user|email_read', 'user|integrations'] as const;
 export const userActionSchema = z.enum(userActions);
 export type UserAction = z.infer<typeof userActionSchema>;
 
 export const tableRecordHistoryActions = ['table_record_history|read'] as const;
 export const tableRecordHistoryActionSchema = z.enum(tableRecordHistoryActions);
 export type TableRecordHistoryAction = z.infer<typeof tableRecordHistoryActionSchema>;
+
+export const instanceActions = ['instance|read', 'instance|update'] as const;
+export const instanceActionSchema = z.enum(instanceActions);
+export type InstanceAction = z.infer<typeof instanceActionSchema>;
+
+export const enterpriseActions = ['enterprise|read', 'enterprise|update'] as const;
+export const enterpriseActionSchema = z.enum(enterpriseActions);
+export type EnterpriseAction = z.infer<typeof enterpriseActionSchema>;
 
 export type Action =
   | SpaceAction
@@ -101,8 +124,11 @@ export type Action =
   | FieldAction
   | RecordAction
   | AutomationAction
+  | AppAction
   | UserAction
-  | TableRecordHistoryAction;
+  | TableRecordHistoryAction
+  | InstanceAction
+  | EnterpriseAction;
 
 export type ActionPrefixMap = {
   [ActionPrefix.Space]: SpaceAction[];
@@ -111,10 +137,29 @@ export type ActionPrefixMap = {
   [ActionPrefix.View]: ViewAction[];
   [ActionPrefix.Field]: FieldAction[];
   [ActionPrefix.Record]: RecordAction[];
-  [ActionPrefix.Automation]: AutomationAction[];
-  [ActionPrefix.User]: UserAction[];
   [ActionPrefix.TableRecordHistory]: TableRecordHistoryAction[];
+  [ActionPrefix.Automation]: AutomationAction[];
+  [ActionPrefix.App]: AppAction[];
+  [ActionPrefix.User]: UserAction[];
+  [ActionPrefix.Instance]: InstanceAction[];
+  [ActionPrefix.Enterprise]: EnterpriseAction[];
 };
+
+export const allActions: readonly Action[] = [
+  ...spaceActions,
+  ...baseActions,
+  ...tableActions,
+  ...viewActions,
+  ...fieldActions,
+  ...recordActions,
+  ...tableRecordHistoryActions,
+  ...automationActions,
+  ...appActions,
+  ...userActions,
+  ...instanceActions,
+  ...enterpriseActions,
+];
+
 export const actionPrefixMap: ActionPrefixMap = {
   [ActionPrefix.Space]: [...spaceActions],
   [ActionPrefix.Base]: [...baseActions],
@@ -122,7 +167,10 @@ export const actionPrefixMap: ActionPrefixMap = {
   [ActionPrefix.View]: [...viewActions],
   [ActionPrefix.Field]: [...fieldActions],
   [ActionPrefix.Record]: [...recordActions],
-  [ActionPrefix.Automation]: [...automationActions],
   [ActionPrefix.TableRecordHistory]: [...tableRecordHistoryActions],
+  [ActionPrefix.Automation]: [...automationActions],
+  [ActionPrefix.App]: [...appActions],
   [ActionPrefix.User]: [...userActions],
+  [ActionPrefix.Instance]: [...instanceActions],
+  [ActionPrefix.Enterprise]: [...enterpriseActions],
 };

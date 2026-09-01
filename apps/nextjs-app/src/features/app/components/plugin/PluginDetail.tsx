@@ -1,10 +1,9 @@
 import { ArrowLeft } from '@teable/icons';
 import type { IGetPluginCenterListVo } from '@teable/openapi';
+import { MarkdownPreview } from '@teable/sdk';
 import { useLanDayjs } from '@teable/sdk/hooks';
 import { Button } from '@teable/ui-lib/shadcn';
-import Image from 'next/image';
 import { useTranslation } from 'next-i18next';
-import { MarkdownPreview } from '../../components/mark-down-preview';
 import { UserAvatar } from '../user/UserAvatar';
 
 export const PluginDetail = (props: {
@@ -16,24 +15,15 @@ export const PluginDetail = (props: {
   const dayjs = useLanDayjs();
   const { t } = useTranslation(['common']);
   return (
-    <div className="absolute left-0 top-0 flex size-full flex-col rounded bg-background">
-      <Button className="ml-2 mt-2 w-20" variant={'ghost'} size={'sm'} onClick={onBack}>
-        <ArrowLeft />
+    <div className="absolute start-0 top-0 flex size-full flex-col rounded bg-background">
+      <Button className="ms-2 mt-2 w-20" variant={'ghost'} size={'sm'} onClick={onBack}>
+        <ArrowLeft className="size-4 shrink-0" />
         {t('common:actions.back')}
       </Button>
       <div className="flex-1 gap-3 overflow-auto px-4 md:flex">
         <div className="flex-1">
           <div className="mb-4 flex h-20 items-center gap-3 p-2">
-            <Image
-              src={plugin.logo}
-              alt={plugin.name}
-              width={56}
-              height={56}
-              sizes="100%"
-              style={{
-                objectFit: 'contain',
-              }}
-            />
+            <img src={plugin.logo} alt={plugin.name} className="size-14 object-contain" />
             <div className="flex-auto">
               <div>{plugin.name}</div>
               <div

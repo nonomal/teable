@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import type { IFilter, ILinkFieldOptionsRo } from '@teable/core';
+import { PRIMARY_SUPPORTED_TYPES, type IFilter, type ILinkFieldOptionsRo } from '@teable/core';
 import { EyeOff, Maximize2 } from '@teable/icons';
 import { getFields } from '@teable/openapi';
 import {
@@ -7,10 +7,11 @@ import {
   HideFieldsBase,
   useFieldFilterLinkContext,
   ViewSelect,
+  FieldSelector,
 } from '@teable/sdk/components';
 import { ReactQueryKeys } from '@teable/sdk/config';
 import { useTableId } from '@teable/sdk/hooks';
-import type { IFieldInstance } from '@teable/sdk/model';
+import { createFieldInstance, type IFieldInstance } from '@teable/sdk/model';
 import { Button, cn, Dialog, DialogContent, DialogTrigger } from '@teable/ui-lib/shadcn';
 import { useTranslation } from 'next-i18next';
 import { useMemo } from 'react';
@@ -21,6 +22,7 @@ interface IMoreOptionsProps {
   fieldId?: string;
   filter?: IFilter | null;
   filterByViewId?: string | null;
+  lookupFieldId?: string | null;
   visibleFieldIds?: string[] | null;
   onChange?: (options: Partial<ILinkFieldOptionsRo>) => void;
 }
@@ -32,6 +34,7 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
     filterByViewId,
     visibleFieldIds: _visibleFieldIds,
     filter,
+    lookupFieldId,
     onChange,
   } = props;
 
@@ -51,6 +54,19 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
     enabled: !!foreignTableId,
   });
 
+  const foreignFieldInstances = useMemo(
+    () => totalFields.map((field) => createFieldInstance(field) as IFieldInstance),
+    [totalFields]
+  );
+
+  const primaryField = useMemo(() => {
+    return foreignFieldInstances.find((field) => field.isPrimary);
+  }, [foreignFieldInstances]);
+
+  const fieldInstances = useMemo(() => {
+    return foreignFieldInstances.filter((field) => PRIMARY_SUPPORTED_TYPES.has(field.type));
+  }, [foreignFieldInstances]);
+
   const { data: withViewFields } = useQuery({
     queryKey: ReactQueryKeys.fieldList(foreignTableId, query),
     queryFn: () => getFields(foreignTableId, query).then((res) => res.data),
@@ -58,6 +74,12 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
   });
 
   const context = useFieldFilterLinkContext(currentTableId, fieldId, !fieldId);
+
+  const viewFieldInstances = useMemo(
+    () =>
+      (withViewFields ?? totalFields).map((field) => createFieldInstance(field) as IFieldInstance),
+    [withViewFields, totalFields]
+  );
 
   const hiddenFieldIds = useMemo(() => {
     // Default all fields are visible
@@ -68,7 +90,7 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
       .map((field) => field.id);
   }, [totalFields, visibleFieldIds]);
 
-  if (!foreignTableId || !totalFields.length) {
+  if (!foreignTableId || !foreignFieldInstances.length) {
     return null;
   }
 
@@ -86,7 +108,17 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
   };
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border px-2 py-3">
+    <div className="mt-2 flex flex-col gap-4 text-sm font-medium">
+      <div className="flex flex-col gap-2">
+        <span>{t('table:field.editor.showByField')}</span>
+        <FieldSelector
+          fields={fieldInstances}
+          value={lookupFieldId ?? primaryField?.id}
+          onSelect={(fieldId) => onChange?.({ lookupFieldId: fieldId ?? undefined })}
+          className="h-9 w-full max-w-none"
+          modal
+        />
+      </div>
       <div className="flex flex-col gap-2">
         <span>{t('table:field.editor.filterByView')}</span>
         <ViewSelect
@@ -94,20 +126,21 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
           value={filterByViewId}
           onChange={(viewId) => onChange?.({ filterByViewId: viewId })}
           cancelable
+          className="my-0 h-9 w-full max-w-none"
         />
       </div>
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-1 rounded-md border px-3 py-2">
         <div className="flex items-center justify-between">
           <span>{t('table:field.editor.filter')}</span>
           <Dialog>
             <DialogTrigger asChild>
-              <Button size={'xs'} variant={'ghost'}>
-                <Maximize2 />
+              <Button size={'icon-xs'} variant={'ghost'}>
+                <Maximize2 className="size-4 shrink-0" />
               </Button>
             </DialogTrigger>
             <DialogContent className="min-w-96 max-w-fit">
               <FilterWithTable
-                fields={totalFields as IFieldInstance[]}
+                fields={foreignFieldInstances}
                 value={filter ?? null}
                 context={context}
                 onChange={(value) => onChange?.({ filter: value })}
@@ -115,9 +148,8 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
             </DialogContent>
           </Dialog>
         </div>
-
         <FilterWithTable
-          fields={totalFields as IFieldInstance[]}
+          fields={foreignFieldInstances}
           value={filter ?? null}
           context={context}
           onChange={(value) => onChange?.({ filter: value })}
@@ -126,14 +158,15 @@ export const MoreLinkOptions = (props: IMoreOptionsProps) => {
       <div className="flex flex-col gap-2">
         <span>{t('table:field.editor.hideFields')}</span>
         <HideFieldsBase
-          fields={(withViewFields ?? totalFields) as IFieldInstance[]}
+          fields={viewFieldInstances}
           hidden={hiddenFieldIds}
           onChange={onHiddenChange}
         >
           <Button
-            variant={'ghost'}
-            className={cn('font-normal shrink-0 truncate text-[13px]', {
-              'bg-secondary': Boolean(visibleCount),
+            size="sm"
+            variant={'outline'}
+            className={cn('font-normal shrink-0 truncate text-sm ', {
+              'bg-secondary hover:opacity-80 ': Boolean(visibleCount),
             })}
           >
             <EyeOff className="size-4" />

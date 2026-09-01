@@ -1,12 +1,15 @@
 import type { IFilterOperator, IFilterItem } from '@teable/core';
 import { cn } from '@teable/ui-lib';
 import { useCallback, useMemo } from 'react';
+import { useTranslation } from '../../../../context/app/i18n';
+import { useInDrawer } from '../../../adaptive-panel';
 import { useCrud } from '../../hooks';
 import type { IBaseFilterCustomComponentProps, IConditionItemProperty } from '../../types';
 import { DefaultErrorLabel } from '../component';
 import { BaseSingleSelect } from '../component/base/BaseSingleSelect';
 import { useOperators } from '../hooks';
 import { useFields } from '../hooks/useFields';
+import { useFilterModal } from '../hooks/useFilterModal';
 import { useOperatorI18nMap } from '../hooks/useOperatorI18nMap';
 import type { IViewFilterConditionItem } from '../types';
 import { shouldFilterByDefaultValue, shouldResetFieldValue } from '../utils';
@@ -17,12 +20,17 @@ interface IOperatorOptions {
 }
 
 interface IBaseOperatorSelectProps<T extends IConditionItemProperty = IViewFilterConditionItem>
-  extends IBaseFilterCustomComponentProps<T, IFilterItem['operator']> {}
+  extends IBaseFilterCustomComponentProps<T, IFilterItem['operator']> {
+  disabledOperators?: IFilterOperator[];
+}
 
 export const OperatorSelect = <T extends IConditionItemProperty = IViewFilterConditionItem>(
   props: IBaseOperatorSelectProps<T>
 ) => {
-  const { value, item, path } = props;
+  const { t } = useTranslation();
+  const inDrawer = useInDrawer();
+  const ctxModal = useFilterModal();
+  const { value, item, path, disabledOperators, modal = ctxModal } = props;
   const { field: fieldId } = item;
   const { onChange } = useCrud();
   const fields = useFields();
@@ -30,19 +38,25 @@ export const OperatorSelect = <T extends IConditionItemProperty = IViewFilterCon
   const labelMapping = useOperatorI18nMap(field?.cellValueType);
   const operators = useOperators(field);
   const operatorOption = useMemo<IOperatorOptions[]>(() => {
-    return operators.map((operator) => {
-      return {
-        label: labelMapping[operator],
-        value: operator,
-      };
-    });
-  }, [labelMapping, operators]);
+    return operators
+      .filter((operator) => !disabledOperators?.includes(operator))
+      .map((operator) => {
+        return {
+          label: labelMapping[operator],
+          value: operator,
+        };
+      });
+  }, [labelMapping, operators, disabledOperators]);
 
   const shouldDisabled = useMemo(() => shouldFilterByDefaultValue(field), [field]);
 
   const onSelectHandler = useCallback(
     (value: IFilterItem['operator'] | null) => {
-      const resetFieldValue = shouldResetFieldValue(item.operator as string, value as string);
+      const resetFieldValue = shouldResetFieldValue(
+        item.operator as string,
+        value as string,
+        field
+      );
       if (resetFieldValue || !operators.includes(value as IFilterOperator)) {
         const newPath = path.slice(0, -1);
         onChange(newPath, {
@@ -54,7 +68,7 @@ export const OperatorSelect = <T extends IConditionItemProperty = IViewFilterCon
         onChange(path, value);
       }
     },
-    [item.field, item.operator, onChange, operators, path]
+    [field, item.field, item.operator, onChange, operators, path]
   );
 
   return (
@@ -62,10 +76,12 @@ export const OperatorSelect = <T extends IConditionItemProperty = IViewFilterCon
       value={value}
       options={operatorOption}
       popoverClassName="w-48"
-      className={cn('shrink-0 justify-between w-28')}
+      drawerTitle={t('filter.selectOperator')}
+      className={cn('h-8 w-[88px] shrink-0 justify-between gap-0 pe-1.5', inDrawer && 'w-[120px]')}
       onSelect={onSelectHandler}
       disabled={shouldDisabled}
       defaultLabel={<DefaultErrorLabel />}
+      modal={modal}
     />
   );
 };

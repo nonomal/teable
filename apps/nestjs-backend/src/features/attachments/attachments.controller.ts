@@ -17,14 +17,12 @@ import type { INotifyVo, SignatureVo } from '@teable/openapi';
 import { Response, Request } from 'express';
 import { ZodValidationPipe } from '../../zod.validation.pipe';
 import { Public } from '../auth/decorators/public.decorator';
-import { TokenAccess } from '../auth/decorators/token.decorator';
 import { AuthGuard } from '../auth/guard/auth.guard';
 import { AttachmentsService } from './attachments.service';
 import { DynamicAuthGuardFactory } from './guard/auth.guard';
 
 @Controller('api/attachments')
 @Public()
-@TokenAccess()
 export class AttachmentsController {
   constructor(private readonly attachmentsService: AttachmentsService) {}
 
@@ -40,6 +38,17 @@ export class AttachmentsController {
     return null;
   }
 
+  // The disposition query param is caller input — a malformed percent
+  // sequence (e.g. a bare '%') is expected; fall back to the raw value so it
+  // gets percent-encoded as-is.
+  private safeDecodeURIComponent(value: string) {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
   @Get('/read/:path(*)')
   async read(
     @Res({ passthrough: true }) res: Response,
@@ -48,25 +57,33 @@ export class AttachmentsController {
     @Query('token') token: string,
     @Query('response-content-disposition') responseContentDisposition?: string
   ) {
+    const headers: Record<string, string> = {};
+    headers['Cross-Origin-Resource-Policy'] = 'unsafe-none';
+    headers['Content-Security-Policy'] = '';
+
     const hasCache = this.attachmentsService.localFileConditionalCaching(path, req.headers, res);
     if (hasCache) {
+      res.set(headers);
       res.status(304);
       return;
     }
-    const { fileStream, headers } = await this.attachmentsService.readLocalFile(path, token);
+    const { fileStream, headers: fileHeaders } = await this.attachmentsService.readLocalFile(
+      path,
+      token
+    );
+    Object.assign(headers, fileHeaders);
     if (responseContentDisposition) {
-      const fileNameMatch =
-        responseContentDisposition.match(/filename\*=UTF-8''([^;]+)/) ||
-        responseContentDisposition.match(/filename="?([^"]+)"?/);
-      if (fileNameMatch) {
-        const fileName = fileNameMatch[1] as string;
-        headers['Content-Disposition'] =
-          `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`;
-      } else {
-        headers['Content-Disposition'] = responseContentDisposition;
-      }
+      // RFC 5987: the filename*= value is already percent-encoded — decode it
+      // before re-encoding, otherwise the file name gets double-encoded. The
+      // plain filename= value is raw and only needs encoding.
+      const utf8Match = responseContentDisposition.match(/filename\*=UTF-8''([^;]+)/);
+      const fileName = utf8Match
+        ? this.safeDecodeURIComponent(utf8Match[1])
+        : responseContentDisposition.match(/filename="?([^"]+)"?/)?.[1];
+      headers['Content-Disposition'] = fileName
+        ? `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`
+        : responseContentDisposition;
     }
-    headers['Cross-Origin-Resource-Policy'] = 'unsafe-none';
     res.set(headers);
     return new StreamableFile(fileStream);
   }

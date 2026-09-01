@@ -1,17 +1,18 @@
 import { useQuery } from '@tanstack/react-query';
-import { HelpCircle, TeableNew } from '@teable/icons';
+import { HelpCircle } from '@teable/icons';
 import { decisionInfoGet } from '@teable/openapi';
 import { useSession } from '@teable/sdk/hooks';
 import { Spin } from '@teable/ui-lib/base';
 import { Button, Card, Separator, cn } from '@teable/ui-lib/shadcn';
-import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import { useMemo } from 'react';
+import { TeableLogo } from '@/components/TeableLogo';
 import { OAuthScope } from '@/features/app/components/oauth/OAuthScope';
 import { UserAvatar } from '@/features/app/components/user/UserAvatar';
 import { usePreviewUrl } from '@/features/app/hooks/usePreviewUrl';
+import { isSafeWebUrl } from '@/features/app/utils/is-safe-web-url';
 import { oauthAppConfig } from '@/features/i18n/oauth-app.config';
 import { BrandFooter } from '../../view/form/components/BrandFooter';
 
@@ -21,7 +22,7 @@ export const OAuthAppDecisionPage = () => {
   const transactionId = router.query.transaction_id as string;
   const getPreviewUrl = usePreviewUrl();
   const { t } = useTranslation(oauthAppConfig.i18nNamespaces);
-  const { data } = useQuery({
+  const { data, error } = useQuery({
     queryKey: ['oauth-app-decision-info', transactionId],
     queryFn: ({ queryKey }) => decisionInfoGet(queryKey[1]).then((data) => data.data),
     enabled: !!transactionId,
@@ -48,6 +49,21 @@ export const OAuthAppDecisionPage = () => {
     return <div>Transaction ID is required</div>;
   }
 
+  if (error) {
+    // Without this branch a failed fetch (expired transaction, lost session)
+    // left the page spinning forever.
+    const message = error instanceof Error && error.message ? error.message : undefined;
+    return (
+      <div className="flex h-screen w-full items-center justify-center px-4">
+        <Card className="max-w-md space-y-4 p-8 text-center">
+          <TeableLogo className="mx-auto size-8" />
+          <h2 className="text-lg font-semibold">{t('common:noun.unknownError')}</h2>
+          {message && <p className="text-sm text-muted-foreground">{message}</p>}
+        </Card>
+      </div>
+    );
+  }
+
   if (!decisionInfo) {
     return <Spin />;
   }
@@ -59,17 +75,13 @@ export const OAuthAppDecisionPage = () => {
       })}
     >
       <Card className="mx-auto my-8 min-w-72 max-w-xl space-y-4">
-        <TeableNew className="ml-8 mt-3 size-8 text-black" />
+        <TeableLogo className="ms-8 mt-3 size-8" />
         <div className="relative mx-auto size-28 overflow-hidden">
           {decisionInfo.logo ? (
-            <Image
+            <img
               src={getPreviewUrl(decisionInfo.logo)}
               alt="card cover"
-              fill
-              sizes="100%"
-              style={{
-                objectFit: 'contain',
-              }}
+              className="absolute inset-0 size-full object-contain"
             />
           ) : (
             <HelpCircle className="size-28" />
@@ -104,11 +116,17 @@ export const OAuthAppDecisionPage = () => {
           </form>
           <div className="text-center">
             <p className="text-sm">{t('oauth:decision.redirectDescription')}</p>
-            <Button variant={'link'}>
-              <Link target="_blank" href={decisionInfo.homepage}>
-                {decisionInfo.homepage}
-              </Link>
-            </Button>
+            {/* Only http(s) gets to be a link; a javascript:/data: homepage
+                renders as inert text. */}
+            {isSafeWebUrl(decisionInfo.homepage) ? (
+              <Button variant={'link'}>
+                <Link target="_blank" href={decisionInfo.homepage}>
+                  {decisionInfo.homepage}
+                </Link>
+              </Button>
+            ) : (
+              <p className="text-sm text-muted-foreground">{decisionInfo.homepage}</p>
+            )}
           </div>
         </div>
       </Card>

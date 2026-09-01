@@ -2,86 +2,182 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import type { IAttachmentItem } from '@teable/core';
 import { Download, X } from '@teable/icons';
-import { Button, cn, FilePreviewItem } from '@teable/ui-lib';
-import React from 'react';
-import { isSystemFileIcon } from '../utils';
+import { Button, cn, FilePreviewItem, isImage } from '@teable/ui-lib';
+import type { CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { EllipsisFileName } from '../../../upload/EllipsisFileName';
+import { FileCover } from '../../../upload/FileCover';
+import { formatFileSize, isSystemFileIcon } from '../utils';
 
 interface IUploadAttachment {
   attachment: IAttachmentItem;
   readonly?: boolean;
   onDelete: (id: string) => void;
+  onRename: (id: string, newName: string) => void;
   fileCover: (data: IAttachmentItem) => string;
   downloadFile: (data: IAttachmentItem) => void;
 }
 
 function AttachmentItem(props: IUploadAttachment) {
-  const { attachment, onDelete, fileCover, downloadFile, readonly } = props;
+  const { attachment, onDelete, onRename, fileCover, downloadFile, readonly } = props;
+  const [isEditing, setIsEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
     id: attachment.id,
+    disabled: readonly || isEditing,
   });
 
-  const style = {
+  const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
+    ...(!readonly &&
+      !isEditing && {
+        WebkitTouchCallout: 'none',
+        WebkitUserSelect: 'none',
+        userSelect: 'none',
+        touchAction: 'manipulation',
+      }),
   };
+
+  const handleStartEdit = useCallback(() => {
+    if (readonly) return;
+    setIsEditing(true);
+  }, [readonly]);
+
+  const handleCommit = useCallback(() => {
+    const value = inputRef.current?.value.trim();
+    setIsEditing(false);
+    if (value && value !== attachment.name) {
+      onRename(attachment.id, value);
+    }
+  }, [attachment.id, attachment.name, onRename]);
+
+  const handleCancel = useCallback(() => {
+    if (inputRef.current) {
+      inputRef.current.value = attachment.name;
+    }
+    setIsEditing(false);
+  }, [attachment.name]);
+
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.value = attachment.name;
+      inputRef.current.focus();
+      const lastDot = attachment.name.lastIndexOf('.');
+      const selectEnd = lastDot > 0 ? lastDot : attachment.name.length;
+      inputRef.current.setSelectionRange(0, selectEnd);
+    }
+  }, [isEditing, attachment.name]);
+
+  const previewUrl = fileCover(attachment) || attachment.presignedUrl;
+  const shouldRenderPreviewImage = Boolean(
+    previewUrl && (isImage(attachment.mimetype) || attachment.lgThumbnailUrl)
+  );
 
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <li key={attachment.id} className="mb-2 flex h-32 w-28 flex-col pr-3">
+      <li
+        key={attachment.id}
+        className="flex h-[132px] w-[104px] flex-col rounded-lg p-1 hover:bg-accent"
+      >
         <div
           className={cn(
-            'group relative flex-1 cursor-pointer overflow-hidden rounded-md border border-border',
+            'group relative flex-1 cursor-pointer overflow-hidden rounded-lg border border-border',
             {
-              'border-none': isSystemFileIcon(attachment.mimetype),
+              'border-none': isSystemFileIcon(attachment.mimetype) && !attachment.lgThumbnailUrl,
             }
           )}
         >
           <FilePreviewItem
-            className="flex items-center justify-center"
+            className="flex items-center justify-center text-[0px]"
             src={attachment.presignedUrl || ''}
             name={attachment.name}
             mimetype={attachment.mimetype}
             size={attachment.size}
           >
-            <img
-              className="size-full object-contain"
-              src={fileCover(attachment)}
-              alt={attachment.name}
-            />
+            {shouldRenderPreviewImage ? (
+              <img
+                className="size-full object-cover"
+                src={previewUrl}
+                alt={attachment.name}
+                draggable={false}
+              />
+            ) : (
+              <FileCover
+                className="size-full object-cover"
+                mimetype={attachment.mimetype}
+                url={previewUrl}
+                name={attachment.name}
+              />
+            )}
           </FilePreviewItem>
-          <ul className="absolute right-0 top-0 hidden w-full justify-end space-x-1 bg-black/40 p-1 group-hover:flex">
-            <li>
+          <div className="absolute inset-x-0 top-0 z-10 hidden items-center gap-1 rounded-t-lg bg-black/60 px-1.5 py-1 text-white group-hover:flex">
+            <span
+              className="me-auto min-w-0 truncate text-xs"
+              title={formatFileSize(attachment.size)}
+            >
+              {formatFileSize(attachment.size)}
+            </span>
+            <Button
+              variant={'ghost'}
+              className="size-auto shrink-0 p-0 text-white hover:bg-white/20 hover:text-white focus-visible:ring-transparent focus-visible:ring-offset-0"
+              onClick={(e) => {
+                e.stopPropagation();
+                downloadFile(attachment);
+              }}
+            >
+              <Download className="size-4 shrink-0" />
+            </Button>
+            {!readonly && (
               <Button
                 variant={'ghost'}
-                className="size-5 rounded-full p-0 text-white focus-visible:ring-transparent focus-visible:ring-offset-0"
+                className="size-auto shrink-0 p-0 text-white hover:bg-white/20 hover:text-white focus-visible:ring-transparent focus-visible:ring-offset-0"
                 onClick={(e) => {
                   e.stopPropagation();
-                  downloadFile(attachment);
+                  onDelete(attachment.id);
                 }}
               >
-                <Download />
+                <X className="size-4 shrink-0" />
               </Button>
-            </li>
-            <li>
-              {!readonly && (
-                <Button
-                  variant={'ghost'}
-                  className="size-5 rounded-full p-0 text-white focus-visible:ring-transparent focus-visible:ring-offset-0"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(attachment.id);
-                  }}
-                >
-                  <X />
-                </Button>
-              )}
-            </li>
-          </ul>
+            )}
+          </div>
         </div>
-        <span className="mt-1 w-full truncate text-center" title={attachment.name}>
-          {attachment.name}
-        </span>
+        {isEditing ? (
+          <input
+            ref={inputRef}
+            className="mt-2 w-full rounded border border-input bg-background px-1 text-[11px] leading-5 outline-none"
+            onBlur={handleCommit}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') {
+                inputRef.current?.blur();
+              } else if (e.key === 'Escape') {
+                handleCancel();
+              }
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <button
+            type="button"
+            className={cn('w-full border border-transparent', !readonly && 'cursor-text')}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              handleStartEdit();
+            }}
+            onPointerDown={(e) => {
+              if (!readonly) e.stopPropagation();
+            }}
+            onMouseDown={(e) => {
+              if (!readonly) e.stopPropagation();
+            }}
+          >
+            <EllipsisFileName className="mt-2" name={attachment.name} />
+          </button>
+        )}
       </li>
     </div>
   );

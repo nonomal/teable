@@ -5,6 +5,18 @@ import { configDefaults, defineConfig } from 'vitest/config';
 const testFiles = ['**/src/**/*.{test,spec}.{js,ts}'];
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      buffer: 'node:buffer',
+    },
+    conditions: ['@teable/source'],
+  },
+  ssr: {
+    resolve: {
+      conditions: ['@teable/source'],
+      externalConditions: ['@teable/source'],
+    },
+  },
   plugins: [
     swc.vite({
       jsc: {
@@ -17,17 +29,13 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    setupFiles: './vitest.setup.ts',
     passWithNoTests: true,
-    poolOptions: {
-      threads: {
-        singleThread: true,
-      },
-    },
+    pool: 'forks',
     coverage: {
       provider: 'v8',
       reportsDirectory: './coverage/unit',
-      extension: ['.js', '.ts'],
-      include: ['src/**/*'],
+      include: ['src/**/*.{js,ts}'],
     },
     include: testFiles,
     exclude: [

@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+/* eslint-disable sonarjs/no-duplicate-string */
+import { Injectable, Optional } from '@nestjs/common';
 import type {
   ISnapshotBase,
   IViewRo,
@@ -9,13 +10,15 @@ import type {
   ISetViewPropertyOpContext,
   IColumnMeta,
   IViewPropertyKeys,
-  IFormViewOptions,
   IGroup,
   IViewOptions,
   IFilter,
   IKanbanViewOptions,
   IFilterSet,
-  IPluginViewOptions,
+  IGalleryViewOptions,
+  ICalendarViewOptions,
+  IColumn,
+  IGridColumnMeta,
 } from '@teable/core';
 import {
   getUniqName,
@@ -25,25 +28,33 @@ import {
   ViewOpBuilder,
   viewVoSchema,
   ViewType,
+  FieldType,
+  CellValueType,
+  HttpErrorCode,
 } from '@teable/core';
-import type { Prisma } from '@teable/db-main-prisma';
+import type { Prisma, View } from '@teable/db-main-prisma';
 import { PrismaService } from '@teable/db-main-prisma';
-import { UploadType } from '@teable/openapi';
 import { Knex } from 'knex';
-import { isEmpty, merge } from 'lodash';
+import { isEmpty, isNull, isString, merge, snakeCase, uniq } from 'lodash';
 import { InjectModel } from 'nest-knexjs';
 import { ClsService } from 'nestjs-cls';
 import { fromZodError } from 'zod-validation-error';
+import { CustomHttpException } from '../../custom.exception';
 import { InjectDbProvider } from '../../db-provider/db.provider';
 import { IDbProvider } from '../../db-provider/db.provider.interface';
+import type { IDataPrismaQueryExecutor } from '../../global/database-router.service';
+import { DatabaseRouter } from '../../global/database-router.service';
+import { CUSTOM_KNEX, DATA_KNEX } from '../../global/knex/knex.module';
 import type { IReadonlyAdapterService } from '../../share-db/interface';
 import { RawOpType } from '../../share-db/interface';
 import type { IClsStore } from '../../types/cls';
-import StorageAdapter from '../attachments/plugins/adapter';
-import { getFullStorageUrl } from '../attachments/plugins/utils';
+import { convertViewVoAttachmentUrl } from '../../utils/convert-view-vo-attachment-url';
 import { BatchService } from '../calculation/batch.service';
+import { SpaceDataDbMigrationGuardService } from '../space/space-data-db-migration-guard.service';
 import { ROW_ORDER_FIELD_PREFIX } from './constant';
 import { createViewInstanceByRaw, createViewVoByRaw } from './model/factory';
+import { adjustFrozenField } from './utils/derive-frozen-fields';
+import { ViewDataSafetyLimitService } from './view-data-safety-limit.service';
 
 type IViewOpContext = IUpdateViewColumnMetaOpContext | ISetViewPropertyOpContext;
 
@@ -53,9 +64,18 @@ export class ViewService implements IReadonlyAdapterService {
     private readonly cls: ClsService<IClsStore>,
     private readonly batchService: BatchService,
     private readonly prismaService: PrismaService,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex,
-    @InjectDbProvider() private readonly dbProvider: IDbProvider
+    private readonly databaseRouter: DatabaseRouter,
+    @InjectModel(CUSTOM_KNEX) private readonly knex: Knex,
+    @InjectModel(DATA_KNEX) private readonly dataKnex: Knex,
+    @InjectDbProvider() private readonly dbProvider: IDbProvider,
+    private readonly viewDataSafetyLimitService: ViewDataSafetyLimitService,
+    @Optional()
+    private readonly spaceDataDbMigrationGuard?: SpaceDataDbMigrationGuardService
   ) {}
+
+  private async assertTableWritable(tableId: string) {
+    await this.spaceDataDbMigrationGuard?.assertTableWritable(tableId);
+  }
 
   getRowIndexFieldName(viewId: string) {
     return `${ROW_ORDER_FIELD_PREFIX}_${viewId}`;
@@ -83,26 +103,25 @@ export class ViewService implements IReadonlyAdapterService {
     return { name, order };
   }
 
-  async existIndex(dbTableName: string, viewId: string) {
+  async existIndex(dbTableName: string, viewId: string, prisma: IDataPrismaQueryExecutor) {
     const columnName = this.getRowIndexFieldName(viewId);
-    const exists = await this.dbProvider.checkColumnExist(
-      dbTableName,
-      columnName,
-      this.prismaService.txClient()
-    );
+    const exists = await this.dbProvider.checkColumnExist(dbTableName, columnName, prisma);
 
     if (exists) {
       return columnName;
     }
   }
 
-  async createViewIndexField(dbTableName: string, viewId: string) {
-    const prisma = this.prismaService.txClient();
-
+  async createViewIndexField(
+    dbTableName: string,
+    viewId: string,
+    prisma: IDataPrismaQueryExecutor,
+    knex: Knex = this.dataKnex
+  ) {
     const rowIndexFieldName = this.getRowIndexFieldName(viewId);
 
     // add a field for maintain row order number
-    const addRowIndexColumnSql = this.knex.schema
+    const addRowIndexColumnSql = knex.schema
       .alterTable(dbTableName, (table) => {
         table.double(rowIndexFieldName);
       })
@@ -110,15 +129,15 @@ export class ViewService implements IReadonlyAdapterService {
     await prisma.$executeRawUnsafe(addRowIndexColumnSql);
 
     // fill initial order for every record, with auto increment integer
-    const updateRowIndexSql = this.knex(dbTableName)
+    const updateRowIndexSql = knex(dbTableName)
       .update({
-        [rowIndexFieldName]: this.knex.ref('__auto_number'),
+        [rowIndexFieldName]: knex.ref('__auto_number'),
       })
       .toQuery();
     await prisma.$executeRawUnsafe(updateRowIndexSql);
 
     // create index
-    const createRowIndexSQL = this.knex.schema
+    const createRowIndexSQL = knex.schema
       .alterTable(dbTableName, (table) => {
         table.index(rowIndexFieldName, this.getRowIndexFieldIndexName(viewId));
       })
@@ -128,18 +147,36 @@ export class ViewService implements IReadonlyAdapterService {
   }
 
   async getOrCreateViewIndexField(dbTableName: string, viewId: string) {
-    const indexFieldName = await this.existIndex(dbTableName, viewId);
-    if (indexFieldName) {
-      return indexFieldName;
-    }
-    return this.createViewIndexField(dbTableName, viewId);
+    const view = await this.prismaService.txClient().view.findUniqueOrThrow({
+      where: { id: viewId },
+      select: { tableId: true },
+    });
+    return this.getOrCreateViewIndexFieldForTable(view.tableId, dbTableName, viewId);
   }
 
+  async getOrCreateViewIndexFieldForTable(tableId: string, dbTableName: string, viewId: string) {
+    return await this.databaseRouter.dataPrismaTransactionForTable(tableId, async (prisma) => {
+      const indexFieldName = await this.existIndex(dbTableName, viewId, prisma);
+      if (indexFieldName) {
+        return indexFieldName;
+      }
+
+      return this.createViewIndexField(
+        dbTableName,
+        viewId,
+        prisma,
+        await this.databaseRouter.dataKnexForTable(tableId)
+      );
+    });
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   private async viewDataCompensation(tableId: string, viewRo: IViewRo) {
     // create view compensation data
     const innerViewRo = { ...viewRo };
+
     // primary field set visible default
-    if (viewRo.type === ViewType.Kanban) {
+    if ([ViewType.Kanban, ViewType.Gallery, ViewType.Calendar].includes(viewRo.type)) {
       const primaryField = await this.prismaService.txClient().field.findFirstOrThrow({
         where: { tableId, isPrimary: true, deletedTime: null },
         select: { id: true },
@@ -150,13 +187,82 @@ export class ViewService implements IReadonlyAdapterService {
         ...columnMeta,
         [primaryField.id]: { ...primaryFieldColumnMeta, visible: true },
       };
+
+      // set default cover field id for gallery view
+      if (innerViewRo.type === ViewType.Gallery) {
+        const fields = await this.prismaService.txClient().field.findMany({
+          where: { tableId, deletedTime: null },
+          select: { id: true, type: true },
+        });
+        const galleryOptions = (innerViewRo.options ?? {}) as IGalleryViewOptions;
+        const coverFieldId =
+          galleryOptions.coverFieldId ??
+          fields.find((field) => field.type === FieldType.Attachment)?.id;
+        innerViewRo.options = {
+          ...galleryOptions,
+          coverFieldId,
+        };
+      }
+
+      // set default start date and end date field ids for calendar view
+      if (innerViewRo.type === ViewType.Calendar) {
+        const fields = await this.prismaService.txClient().field.findMany({
+          where: { tableId, deletedTime: null },
+          select: { id: true, cellValueType: true, isMultipleCellValue: true },
+        });
+        const calendarOptions = (innerViewRo.options ?? {}) as ICalendarViewOptions;
+
+        const dateFieldIds = fields
+          .filter(
+            ({ cellValueType, isMultipleCellValue }) =>
+              cellValueType === CellValueType.DateTime && !isMultipleCellValue
+          )
+          .map(({ id }) => id);
+
+        if (!dateFieldIds.length) return innerViewRo;
+
+        const startDateFieldId = calendarOptions.startDateFieldId ?? dateFieldIds[0];
+        const endDateFieldId = calendarOptions.endDateFieldId ?? dateFieldIds[1] ?? dateFieldIds[0];
+
+        innerViewRo.options = {
+          ...calendarOptions,
+          startDateFieldId,
+          endDateFieldId,
+        };
+      }
+    }
+
+    if (viewRo.type === ViewType.Form) {
+      const fields = await this.prismaService.txClient().field.findMany({
+        where: { tableId, deletedTime: null },
+        select: {
+          id: true,
+          type: true,
+          isComputed: true,
+        },
+        orderBy: [{ order: 'asc' }, { createdTime: 'asc' }],
+      });
+
+      if (!fields?.length) return innerViewRo;
+
+      const columnMeta = innerViewRo.columnMeta ?? {};
+      for (const f of fields) {
+        const { id, type, isComputed } = f;
+
+        if (isComputed || type === FieldType.Button) continue;
+
+        const prev = columnMeta[id] ?? {};
+        columnMeta[id] = { ...prev, visible: true } as IColumn;
+      }
+      innerViewRo.columnMeta = columnMeta;
     }
     return innerViewRo;
   }
 
   async restoreView(tableId: string, viewId: string) {
+    await this.assertTableWritable(tableId);
     await this.prismaService.$tx(async () => {
-      await this.prismaService.view.update({
+      await this.prismaService.txClient().view.update({
         where: { id: viewId },
         data: {
           deletedTime: null,
@@ -172,18 +278,44 @@ export class ViewService implements IReadonlyAdapterService {
 
   async createDbView(tableId: string, viewRo: IViewRo) {
     const userId = this.cls.get('user.id');
+    await this.assertTableWritable(tableId);
+    await this.viewDataSafetyLimitService.ensureCanCreateView(tableId);
     const createViewRo = await this.viewDataCompensation(tableId, viewRo);
 
-    const { description, type, options, sort, filter, group, columnMeta } = createViewRo;
+    const {
+      description,
+      type,
+      options,
+      sort,
+      filter,
+      group,
+      columnMeta,
+      shareId,
+      shareMeta,
+      enableShare,
+      isLocked,
+    } = createViewRo;
 
     const { name, order } = await this.polishOrderAndName(tableId, createViewRo);
+    this.viewDataSafetyLimitService.ensureViewPayload({
+      name,
+      description,
+      filter,
+      sort,
+      group,
+      options,
+    });
 
     const viewId = generateViewId();
     const prisma = this.prismaService.txClient();
 
+    const activeFieldIds = await this.getActiveFieldIdSet(tableId);
     const orderColumnMeta = await this.generateViewOrderColumnMeta(tableId);
 
-    const mergedColumnMeta = merge(orderColumnMeta, columnMeta);
+    const mergedColumnMeta = this.filterColumnMetaByFieldIds(
+      merge(orderColumnMeta, columnMeta),
+      activeFieldIds
+    );
 
     const data: Prisma.ViewCreateInput = {
       id: viewId,
@@ -203,48 +335,49 @@ export class ViewService implements IReadonlyAdapterService {
       order,
       createdBy: userId,
       columnMeta: mergedColumnMeta ? JSON.stringify(mergedColumnMeta) : JSON.stringify({}),
+      shareId,
+      shareMeta: shareMeta ? JSON.stringify(shareMeta) : undefined,
+      enableShare,
+      isLocked,
     };
 
     return await prisma.view.create({ data });
   }
 
-  async getViewById(viewId: string): Promise<IViewVo> {
-    const viewRaw = await this.prismaService.txClient().view.findUniqueOrThrow({
-      where: { id: viewId, deletedTime: null },
+  async getViewById(tableId: string, viewId: string): Promise<IViewVo> {
+    const viewRaw = await this.prismaService.txClient().view.findFirst({
+      where: { id: viewId, tableId, deletedTime: null },
     });
+    if (!viewRaw) {
+      throw new CustomHttpException('View not found', HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.view.notFound',
+        },
+      });
+    }
+    const activeFieldIds = await this.getActiveFieldIdSet(viewRaw.tableId);
+    const sanitizedViewRaw = this.sanitizeViewRawColumnMeta(viewRaw, activeFieldIds);
 
-    return this.convertViewVoAttachmentUrl(createViewInstanceByRaw(viewRaw) as IViewVo);
+    return convertViewVoAttachmentUrl(createViewInstanceByRaw(sanitizedViewRaw) as IViewVo);
   }
 
-  convertViewVoAttachmentUrl(viewVo: IViewVo) {
-    if (viewVo.type === ViewType.Form) {
-      const formOptions = viewVo.options as IFormViewOptions;
-      formOptions?.coverUrl &&
-        (formOptions.coverUrl = formOptions.coverUrl
-          ? getFullStorageUrl(StorageAdapter.getBucket(UploadType.Form), formOptions.coverUrl)
-          : undefined);
-      formOptions?.logoUrl &&
-        (formOptions.logoUrl = formOptions.logoUrl
-          ? getFullStorageUrl(StorageAdapter.getBucket(UploadType.Form), formOptions.logoUrl)
-          : undefined);
-    }
-    if (viewVo.type === ViewType.Plugin) {
-      const pluginOptions = viewVo.options as IPluginViewOptions;
-      pluginOptions.pluginLogo = getFullStorageUrl(
-        StorageAdapter.getBucket(UploadType.Plugin),
-        pluginOptions.pluginLogo
-      );
-    }
-    return viewVo;
-  }
-
-  async getViews(tableId: string): Promise<IViewVo[]> {
+  async getViews(tableId: string, ids?: string[]): Promise<IViewVo[]> {
     const viewRaws = await this.prismaService.txClient().view.findMany({
-      where: { tableId, deletedTime: null },
+      where: {
+        tableId,
+        deletedTime: null,
+        id: { in: ids },
+      },
       orderBy: { order: 'asc' },
     });
 
-    return viewRaws.map((viewRaw) => this.convertViewVoAttachmentUrl(createViewVoByRaw(viewRaw)));
+    const activeFieldIds = await this.getActiveFieldIdSet(tableId);
+
+    return viewRaws.map((viewRaw) =>
+      convertViewVoAttachmentUrl(
+        createViewVoByRaw(this.sanitizeViewRawColumnMeta(viewRaw, activeFieldIds))
+      )
+    );
   }
 
   async createView(tableId: string, viewRo: IViewRo): Promise<IViewVo> {
@@ -254,27 +387,61 @@ export class ViewService implements IReadonlyAdapterService {
       { docId: viewRaw.id, version: 0, data: viewRaw },
     ]);
 
-    return this.convertViewVoAttachmentUrl(createViewVoByRaw(viewRaw));
+    const activeFieldIds = await this.getActiveFieldIdSet(tableId);
+    return convertViewVoAttachmentUrl(
+      createViewVoByRaw(this.sanitizeViewRawColumnMeta(viewRaw, activeFieldIds))
+    );
   }
 
   async deleteView(tableId: string, viewId: string) {
-    const { version } = await this.prismaService
-      .txClient()
-      .view.findFirstOrThrow({
-        where: { id: viewId, tableId, deletedTime: null },
-      })
-      .catch(() => {
-        throw new BadRequestException('Table not found');
-      });
+    await this.assertTableWritable(tableId);
+    // Use SELECT FOR UPDATE to lock all views in the table to prevent concurrent deletion
+    // This ensures that when checking if this is the last view, no other transaction
+    // can delete views simultaneously
+    const views = await this.prismaService.txClient().$queryRaw<
+      Array<{ id: string; version: number }>
+    >`
+      SELECT id, version FROM "view" 
+      WHERE "table_id" = ${tableId} 
+        AND "deleted_time" IS NULL 
+      FOR UPDATE
+    `;
 
-    await this.del(version + 1, tableId, viewId);
+    if (views.length <= 1) {
+      throw new CustomHttpException(
+        'Cannot delete the last view in a table. A table must have at least one view.',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.view.cannotDeleteLastView',
+          },
+        }
+      );
+    }
+
+    const viewToDelete = views.find((v) => v.id === viewId);
+    if (!viewToDelete) {
+      throw new CustomHttpException(
+        `View not found with id: ${viewId} and tableId: ${tableId}`,
+        HttpErrorCode.NOT_FOUND,
+        {
+          localization: {
+            i18nKey: 'httpErrors.view.notFound',
+          },
+        }
+      );
+    }
+
+    await this.del(viewToDelete.version + 1, tableId, viewId);
 
     await this.batchService.saveRawOps(tableId, RawOpType.Del, IdPrefix.View, [
-      { docId: viewId, version },
+      { docId: viewId, version: viewToDelete.version },
     ]);
   }
 
   async updateViewSort(tableId: string, viewId: string, sort: ISort) {
+    await this.assertTableWritable(tableId);
+    this.viewDataSafetyLimitService.ensureSort(sort);
     const viewRaw = await this.prismaService
       .txClient()
       .view.findFirstOrThrow({
@@ -285,7 +452,15 @@ export class ViewService implements IReadonlyAdapterService {
         },
       })
       .catch(() => {
-        throw new BadRequestException('View not found');
+        throw new CustomHttpException(
+          `View not found with id: ${viewId} and tableId: ${tableId}`,
+          HttpErrorCode.NOT_FOUND,
+          {
+            localization: {
+              i18nKey: 'httpErrors.view.notFound',
+            },
+          }
+        );
       });
 
     const updateInput: Prisma.ViewUpdateInput = {
@@ -319,27 +494,107 @@ export class ViewService implements IReadonlyAdapterService {
   }
 
   async updateViewByOps(tableId: string, viewId: string, ops: IOtOperation[]) {
-    const { version } = await this.prismaService.txClient().view.findFirstOrThrow({
-      where: { id: viewId, tableId, deletedTime: null },
+    await this.batchUpdateViewByOps(tableId, { [viewId]: ops });
+  }
+
+  async batchUpdateViewByOps(tableId: string, opsMap: { [viewId: string]: IOtOperation[] }) {
+    await this.assertTableWritable(tableId);
+    const { updateViewMap, updateViewKeySet } = this.getBatchUpdateViewContext(opsMap);
+    if (updateViewKeySet.size === 0) {
+      return;
+    }
+    const updatedViewIds = Object.keys(updateViewMap).filter((viewId) => {
+      const viewData = updateViewMap[viewId];
+      const { property = {}, columnMeta = {} } = viewData ?? {};
+      return Object.keys(property).length > 0 || Object.keys(columnMeta).length > 0;
+    });
+
+    const isColumnMetaUpdated = updateViewKeySet.has('columnMeta');
+    const viewRaws = await this.prismaService.txClient().view.findMany({
+      where: { id: { in: updatedViewIds }, tableId, deletedTime: null },
       select: {
+        columnMeta: isColumnMetaUpdated,
+        options: isColumnMetaUpdated,
+        type: isColumnMetaUpdated,
+        id: true,
         version: true,
       },
     });
-    const opContext = ops.map((op) => {
-      const ctx = ViewOpBuilder.detect(op);
-      if (!ctx) {
-        throw new Error('unknown field editing op');
+
+    const userId = this.cls.get('user.id');
+    const data: {
+      id: string;
+      values: { [key: string]: unknown };
+    }[] = viewRaws.map((view) => {
+      const { id: viewId, version, columnMeta, options, type } = view;
+      const updateView = updateViewMap[viewId];
+
+      const values: Record<string, unknown> = {
+        ...updateView.property,
+        version: version + 1,
+        lastModifiedBy: userId,
+      };
+
+      if (updateView.columnMeta) {
+        const originColumnMeta = isString(columnMeta) ? JSON.parse(columnMeta) : {};
+        const newColumnMeta = this.mergeUpdatedViewColumnMeta(
+          originColumnMeta,
+          updateView.columnMeta
+        );
+        values.columnMeta = JSON.stringify(newColumnMeta);
+
+        if (type === ViewType.Grid) {
+          const originOptions = options ? JSON.parse(options) : {};
+          const newOptions = adjustFrozenField(
+            originOptions,
+            originColumnMeta,
+            updateView.columnMeta as IGridColumnMeta
+          );
+
+          if (newOptions) {
+            values.options = JSON.stringify(newOptions);
+            const newOptionsOp = ViewOpBuilder.editor.setViewProperty.build({
+              key: 'options',
+              oldValue: originOptions,
+              newValue: newOptions,
+            });
+            opsMap[viewId] = [...(opsMap[viewId] ?? []), newOptionsOp];
+          }
+        }
       }
-      return ctx as IViewOpContext;
+
+      return {
+        id: viewId,
+        values,
+      };
     });
-    await this.update(version + 1, tableId, viewId, opContext);
-    await this.batchService.saveRawOps(tableId, RawOpType.Edit, IdPrefix.View, [
-      {
-        docId: viewId,
-        version,
-        data: ops,
-      },
-    ]);
+    for (const viewId of updatedViewIds) {
+      this.viewDataSafetyLimitService.ensureSerializedProperties(updateViewMap[viewId]?.property);
+    }
+
+    if (data.length === 1) {
+      const { id, values } = data[0];
+      await this.prismaService.txClient().view.update({
+        where: { id },
+        data: values,
+      });
+    } else if (data.length > 1) {
+      await this.batchUpdateDB(data);
+    }
+
+    const opDataList: {
+      docId: string;
+      version: number;
+      data?: unknown;
+    }[] = viewRaws.map((view) => {
+      return {
+        docId: view.id,
+        version: view.version,
+        data: opsMap[view.id],
+      };
+    });
+
+    this.batchService.saveRawOps(tableId, RawOpType.Edit, IdPrefix.View, opDataList);
   }
 
   async create(tableId: string, view: IViewVo) {
@@ -347,6 +602,7 @@ export class ViewService implements IReadonlyAdapterService {
   }
 
   async del(_version: number, _tableId: string, viewId: string) {
+    await this.assertTableWritable(_tableId);
     await this.prismaService.txClient().view.update({
       where: { id: viewId },
       data: {
@@ -375,76 +631,182 @@ export class ViewService implements IReadonlyAdapterService {
     });
   }
 
-  async getUpdatedColumnMeta(
-    tableId: string,
-    viewId: string,
-    opContexts: IUpdateViewColumnMetaOpContext
-  ) {
-    const { fieldId, newColumnMeta } = opContexts;
-    const { columnMeta: rawColumnMeta } = await this.prismaService
-      .txClient()
-      .view.findUniqueOrThrow({
-        select: { columnMeta: true },
-        where: { tableId, id: viewId, deletedTime: null },
-      });
-    const columnMeta = JSON.parse(rawColumnMeta);
+  getUpdateViewContext(ops: IOtOperation[]) {
+    const opContexts = ops.map((op) => {
+      const ctx = ViewOpBuilder.detect(op);
+      if (!ctx) {
+        throw new CustomHttpException(`unknown view editing op`, HttpErrorCode.VALIDATION_ERROR, {
+          localization: {
+            i18nKey: 'httpErrors.custom.invalidOperation',
+          },
+        });
+      }
+      return ctx as IViewOpContext;
+    });
 
-    // delete column meta
-    if (!newColumnMeta) {
-      const preData = {
-        ...columnMeta,
-      };
-      delete preData[fieldId];
-      return (
-        JSON.stringify({
-          ...preData,
-        }) ?? {}
-      );
+    const setPropertyOpContexts: ISetViewPropertyOpContext[] = [];
+    const updateColumnMetaOpContexts: IUpdateViewColumnMetaOpContext[] = [];
+    for (const opContext of opContexts) {
+      if (opContext.name === OpName.SetViewProperty) {
+        setPropertyOpContexts.push(opContext);
+      } else if (opContext.name === OpName.UpdateViewColumnMeta) {
+        updateColumnMetaOpContexts.push(opContext);
+      }
     }
 
-    return (
-      JSON.stringify({
-        ...columnMeta,
-        [fieldId]: newColumnMeta,
-      }) ?? {}
+    const res: {
+      property?: Record<string, string | null>;
+      columnMeta?: Record<string, IColumn | null>;
+    } = {};
+    if (setPropertyOpContexts.length > 0) {
+      res.property = this.mergeSetViewPropertyByOpContexts(setPropertyOpContexts);
+    }
+    if (updateColumnMetaOpContexts.length > 0) {
+      res.columnMeta = this.mergeUpdatedViewColumnMetaByOpContexts(updateColumnMetaOpContexts);
+    }
+
+    return res;
+  }
+
+  getBatchUpdateViewContext(opsMap: { [viewId: string]: IOtOperation[] }) {
+    const updateViewMap: {
+      [viewId: string]: {
+        property?: Record<string, string | null>;
+        columnMeta?: Record<string, IColumn | null>;
+      };
+    } = {};
+    const updateViewKeySet = new Set<string>();
+    for (const [viewId, ops] of Object.entries(opsMap)) {
+      const { property, columnMeta } = this.getUpdateViewContext(ops);
+
+      Object.keys(property ?? {}).forEach((key) => {
+        updateViewKeySet.add(key);
+      });
+      if (Object.keys(columnMeta ?? {}).length > 0) {
+        updateViewKeySet.add('columnMeta');
+      }
+
+      updateViewMap[viewId] = {
+        property,
+        columnMeta,
+      };
+    }
+
+    return {
+      updateViewMap,
+      updateViewKeySet,
+    };
+  }
+
+  mergeUpdatedViewColumnMeta(
+    originColumnMeta: IColumnMeta,
+    newColumnMeta: Record<string, IColumn | null>
+  ) {
+    const newColumnMetaKeys = uniq([
+      ...Object.keys(originColumnMeta),
+      ...Object.keys(newColumnMeta),
+    ]);
+
+    return newColumnMetaKeys.reduce(
+      (acc: IColumnMeta, key) => {
+        if (isNull(newColumnMeta[key])) {
+          delete acc[key];
+        } else if (newColumnMeta[key]) {
+          acc[key] = newColumnMeta[key] as IColumn;
+        }
+        return acc;
+      },
+      { ...originColumnMeta }
     );
   }
 
-  async update(version: number, tableId: string, viewId: string, opContexts: IViewOpContext[]) {
-    const userId = this.cls.get('user.id');
-
+  mergeUpdatedViewColumnMetaByOpContexts(opContexts: IUpdateViewColumnMetaOpContext[]) {
+    const result: Record<string, IColumn | null> = {};
     for (const opContext of opContexts) {
-      const updateData: Prisma.ViewUpdateInput = { version, lastModifiedBy: userId };
-      if (opContext.name === OpName.UpdateViewColumnMeta) {
-        const columnMeta = await this.getUpdatedColumnMeta(tableId, viewId, opContext);
-        await this.prismaService.txClient().view.update({
-          where: { id: viewId },
-          data: {
-            ...updateData,
-            columnMeta,
-          },
-        });
+      const { fieldId, newColumnMeta } = opContext;
+
+      if (!newColumnMeta) {
+        result[fieldId] = null;
+      } else {
+        const old = result[fieldId] ?? {};
+        result[fieldId] = {
+          ...old,
+          ...newColumnMeta,
+        };
+      }
+    }
+
+    return result;
+  }
+
+  mergeSetViewPropertyByOpContexts(opContexts: ISetViewPropertyOpContext[]) {
+    const result: Record<string, string | null> = {};
+    for (const opContext of opContexts) {
+      const { key, newValue } = opContext;
+      const parseResult = viewVoSchema.partial().safeParse({ [key]: newValue });
+      if (!parseResult.success) {
+        throw new CustomHttpException(
+          fromZodError(parseResult.error).message,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.view.propertyParseError',
+            },
+          }
+        );
+      }
+      const parsedValue = parseResult.data[key] as IViewPropertyKeys;
+      result[key] =
+        parsedValue == null
+          ? null
+          : typeof parsedValue === 'object'
+            ? JSON.stringify(parsedValue)
+            : parsedValue;
+    }
+    return result;
+  }
+
+  async batchUpdateDB(
+    data: {
+      id: string;
+      values: { [key: string]: unknown };
+    }[]
+  ) {
+    if (data.length === 0) {
+      return;
+    }
+
+    const caseStatements: Record<string, { when: string; then: unknown }[]> = {};
+    for (const { id, values } of data) {
+      for (const [key, value] of Object.entries(values)) {
+        if (!caseStatements[key]) {
+          caseStatements[key] = [];
+        }
+        caseStatements[key].push({ when: id, then: value });
+      }
+    }
+
+    const updatePayload: Record<string, Knex.Raw> = {};
+    for (const [key, statements] of Object.entries(caseStatements)) {
+      if (statements.length === 0) {
         continue;
       }
-      const { key, newValue } = opContext;
-      const result = viewVoSchema.partial().safeParse({ [key]: newValue });
-      if (!result.success) {
-        throw new BadRequestException(fromZodError(result.error).message);
+      const column = snakeCase(key);
+      const whenClauses: string[] = [];
+      const caseBindings: unknown[] = [];
+      for (const { when, then } of statements) {
+        whenClauses.push('WHEN ?? = ? THEN ?');
+        caseBindings.push('id', when, then);
       }
-      const parsedValue = result.data[key] as IViewPropertyKeys;
-      await this.prismaService.txClient().view.update({
-        where: { id: viewId },
-        data: {
-          ...updateData,
-          [key]:
-            parsedValue == null
-              ? null
-              : typeof parsedValue === 'object'
-                ? JSON.stringify(parsedValue)
-                : parsedValue,
-        },
-      });
+      const caseExpression = `CASE ${whenClauses.join(' ')} ELSE ?? END`;
+      const rawExpression = this.knex.raw(caseExpression, [...caseBindings, column]);
+      updatePayload[column] = rawExpression;
     }
+
+    const idsToUpdate = data.map((item) => item.id);
+    const finalSql = this.knex('view').update(updatePayload).whereIn('id', idsToUpdate).toString();
+    // fs.writeFileSync('batch-update-view-sql.sql', finalSql);
+    await this.prismaService.txClient().$executeRawUnsafe(finalSql);
   }
 
   async getSnapshotBulk(tableId: string, ids: string[]): Promise<ISnapshotBase<IViewVo>[]> {
@@ -454,19 +816,69 @@ export class ViewService implements IReadonlyAdapterService {
 
     if (views.length !== ids.length) {
       const notFoundIds = ids.filter((id) => !views.some((view) => view.id === id));
-      throw new BadRequestException(`View not found: ${notFoundIds.join(', ')}`);
+      throw new CustomHttpException(
+        `View not found: ${notFoundIds.join(', ')}`,
+        HttpErrorCode.NOT_FOUND,
+        {
+          localization: {
+            i18nKey: 'httpErrors.view.notFound',
+          },
+        }
+      );
     }
+
+    const activeFieldIds = await this.getActiveFieldIdSet(tableId);
 
     return views
       .map((view) => {
+        const sanitizedView = this.sanitizeViewRawColumnMeta(view, activeFieldIds);
         return {
           id: view.id,
           v: view.version,
           type: 'json0',
-          data: this.convertViewVoAttachmentUrl(createViewVoByRaw(view)),
+          data: convertViewVoAttachmentUrl(createViewVoByRaw(sanitizedView)),
         };
       })
       .sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+  }
+
+  private async getActiveFieldIdSet(tableId: string) {
+    const fields = await this.prismaService.txClient().field.findMany({
+      where: { tableId, deletedTime: null },
+      select: { id: true },
+    });
+
+    return new Set(fields.map(({ id }) => id));
+  }
+
+  private filterColumnMetaByFieldIds(
+    columnMeta: IColumnMeta | null | undefined,
+    fieldIds: Set<string>
+  ) {
+    if (!columnMeta) {
+      return columnMeta;
+    }
+
+    return Object.entries(columnMeta).reduce<IColumnMeta>((acc, [fieldId, meta]) => {
+      if (fieldIds.has(fieldId)) {
+        acc[fieldId] = meta;
+      }
+      return acc;
+    }, {});
+  }
+
+  private sanitizeViewRawColumnMeta<T extends View>(viewRaw: T, fieldIds: Set<string>): T {
+    const columnMeta = JSON.parse(viewRaw.columnMeta as string) as IColumnMeta | null | undefined;
+    const filteredColumnMeta = this.filterColumnMetaByFieldIds(columnMeta, fieldIds);
+
+    if (Object.keys(filteredColumnMeta ?? {}).length === Object.keys(columnMeta ?? {}).length) {
+      return viewRaw;
+    }
+
+    return {
+      ...viewRaw,
+      columnMeta: JSON.stringify(filteredColumnMeta ?? {}),
+    };
   }
 
   async getDocIdsByQuery(tableId: string, query?: { includeIds: string[] }) {
@@ -500,7 +912,11 @@ export class ViewService implements IReadonlyAdapterService {
     }, {});
   }
 
-  async initViewColumnMeta(tableId: string, fieldIds: string[], columnsMeta?: IColumnMeta[]) {
+  async initViewColumnMeta(
+    tableId: string,
+    fieldIds: string[],
+    initViewColumnMapList?: Record<string, IColumn>[]
+  ) {
     // 1. get all views id and column meta by tableId
     const view = await this.prismaService.txClient().view.findMany({
       where: { tableId, deletedTime: null },
@@ -511,6 +927,7 @@ export class ViewService implements IReadonlyAdapterService {
       return;
     }
 
+    const opsMap: { [viewId: string]: IOtOperation[] } = {};
     for (let i = 0; i < view.length; i++) {
       const ops: IOtOperation[] = [];
       const viewId = view[i].id;
@@ -519,11 +936,11 @@ export class ViewService implements IReadonlyAdapterService {
         ? -1
         : Math.max(...Object.values(curColumnMeta).map((meta) => meta.order));
       fieldIds.forEach((fieldId, i) => {
-        const columnMeta = columnsMeta?.[i]?.[viewId];
+        const initColumn = initViewColumnMapList?.[i]?.[viewId];
         const op = ViewOpBuilder.editor.updateViewColumnMeta.build({
           fieldId: fieldId,
-          newColumnMeta: columnMeta
-            ? { ...columnMeta, order: columnMeta.order ?? maxOrder + 1 }
+          newColumnMeta: initColumn
+            ? { ...initColumn, order: initColumn.order ?? maxOrder + 1 }
             : { order: maxOrder + 1 },
           oldColumnMeta: undefined,
         });
@@ -531,8 +948,10 @@ export class ViewService implements IReadonlyAdapterService {
       });
 
       // 2. build update ops and emit
-      await this.updateViewByOps(tableId, viewId, ops);
+      opsMap[viewId] = ops;
     }
+
+    await this.batchUpdateViewByOps(tableId, opsMap);
   }
 
   async deleteViewRelativeByFields(tableId: string, fieldIds: string[]) {
@@ -551,9 +970,14 @@ export class ViewService implements IReadonlyAdapterService {
     });
 
     if (!view) {
-      throw new Error(`no view in this table`);
+      throw new CustomHttpException(`no view in this table`, HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.view.notFound',
+        },
+      });
     }
 
+    const opsMap: { [viewId: string]: IOtOperation[] } = {};
     for (let i = 0; i < view.length; i++) {
       const ops: IOtOperation[] = [];
       const viewId = view[i].id;
@@ -595,8 +1019,9 @@ export class ViewService implements IReadonlyAdapterService {
       });
 
       // 2. build update ops and emit
-      await this.updateViewByOps(tableId, viewId, ops);
+      opsMap[viewId] = ops;
     }
+    await this.batchUpdateViewByOps(tableId, opsMap);
   }
 
   getDeleteFilterByFieldIdOps(filter: IFilterSet, fieldId: string) {

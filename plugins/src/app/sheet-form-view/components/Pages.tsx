@@ -44,8 +44,8 @@ function addQueryParamsToWebSocketUrl(url: string, params: Record<string, string
 }
 
 function getWsPath() {
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${wsProtocol}//${window.location.host}/socket`;
+  // SockJS uses HTTP/HTTPS protocol for initial handshake
+  return `${window.location.origin}/socket`;
 }
 
 interface IPageProps {
@@ -107,18 +107,18 @@ const Container = (props: IPageProps & { uiConfig?: IUIConfig }) => {
     setIsIframeMode(isIframe);
   }, []);
 
-  if (shareId && !baseId) {
-    return <div className="text-center text-muted-foreground">{t('notBaseId')}</div>;
+  if (!baseId && !shareId) {
+    return <div className="text-muted-foreground text-center">{t('notBaseId')}</div>;
   }
 
   if (!pluginInstallId) {
-    return <div className="text-center text-muted-foreground">{t('notPluginInstallId')}</div>;
+    return <div className="text-muted-foreground text-center">{t('notPluginInstallId')}</div>;
   }
 
   if (!pluginBridge && isIframeMode) {
     return (
       <div className="flex flex-col items-center justify-center">
-        <p className="text-center text-muted-foreground">{t('initBridge')}</p>
+        <p className="text-muted-foreground text-center">{t('initBridge')}</p>
       </div>
     );
   }

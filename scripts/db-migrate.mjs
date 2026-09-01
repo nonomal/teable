@@ -1,32 +1,52 @@
 #!/usr/bin/env zx
-import { parseDsn as parse } from '@httpx/dsn-parser';
+import 'zx/globals'
 
 const env = $.env;
-let isCi = ['true', '1'].includes(env?.CI ?? '');
+const metaDatabaseUrl = env.PRISMA_META_DATABASE_URL ?? env.PRISMA_DATABASE_URL;
+const dataDatabaseUrl = metaDatabaseUrl;
+const appRoot = env.APP_ROOT ?? '/app';
 
-const buildVersion = env.BUILD_VERSION;
-const databaseUrl = env.PRISMA_DATABASE_URL;
+process.env.PRISMA_HIDE_UPDATE_MESSAGE = 'true';
 
-const parseDsn = (dsn) => {
-  const parsedDsn = parse(dsn);
+const parseDsn = (dsn, label) => {
+  try {
+    const url = new URL(dsn);
+    const driver = url.protocol.replace(':', '');
+    
+    if (!['postgresql', 'postgres'].includes(driver)) {
+      throw new Error(`Unsupported database driver: ${driver}`);
+    }
 
-  if (!parsedDsn.success) {
-    throw new Error(`DATABASE_URL ${parsedDsn.reason}`);
+    return {
+      driver,
+      host: url.hostname,
+      port: parseInt(url.port, 10),
+    };
+  } catch (error) {
+    throw new Error(`Invalid ${label} database url: ${error.message}`);
   }
-  if (!parsedDsn.value.port) {
-    throw new Error(`DATABASE_URL must provide a port`);
-  }
+};
 
-  return parsedDsn.value;
+const migrateWorkspace = async ({ label, workspacePath, schema }) => {
+  console.log(`Running ${label} database migration...`);
+  const result = await $({
+    cwd: `${appRoot}/${workspacePath}`,
+  })`node ./scripts/run-prisma-command.mjs migrate deploy --schema ${schema}`;
+  console.log(`${label} database migration completed:`, result);
+  return result;
 };
 
 const pgMigrate = async () => {
-  cd('postgres_migrate');
-  return await $`prisma migrate deploy`;
-};
-
-const killMe = async () => {
-  await $`exit 0`;
+  await migrateWorkspace({
+    label: 'meta',
+    workspacePath: 'packages/db-main-prisma',
+    schema: './prisma/postgres/schema.prisma',
+  });
+  await migrateWorkspace({
+    label: 'data',
+    workspacePath: 'packages/db-data-prisma',
+    schema: './prisma/schema.prisma',
+  });
 };
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -46,38 +66,42 @@ const retryOperation = async (operation, maxRetries = 5, delay = 3000) => {
   }
 };
 
-console.log(`DB Migrate Version: ${buildVersion}`);
-await $`prisma -v`;
+console.log(`DB Migrate Starting...`);
+const targets = [
+  { label: 'meta', url: metaDatabaseUrl },
+  { label: 'data', url: dataDatabaseUrl },
+];
 
-const { driver, host, port } = parseDsn(databaseUrl);
+for (const target of targets) {
+  if (!target.url) {
+    throw new Error(`Missing ${target.label} database url`);
+  }
+}
+
+const parsedTargets = targets.map((target) => ({
+  ...target,
+  ...parseDsn(target.url, target.label),
+}));
 
 const adapters = {
   postgresql: pgMigrate,
   postgres: pgMigrate,
 };
 
-if (!driver || !adapters[driver]) {
-  throw new Error(`Adapter ${driver} is not allowed`);
+for (const { label, driver, host, port } of parsedTargets) {
+  if (!driver || !adapters[driver]) {
+    throw new Error(`Adapter ${driver} for ${label} database is not allowed`);
+  }
+  console.log(`wait-for ${host}:${port} [${label}/${driver}] deploying.`);
 }
-
-console.log(`wait-for  ${host}:${port} 【${driver}】deploying.`);
 
 try {
   await retryOperation(async () => {
-    const result =
-    await $`scripts/wait-for ${host}:${port} --timeout=15 -- echo 'database driver:【${driver}】started successfully.'`;
-    if (result.exitCode !== 0) {
-      console.error(`database driver:【${driver}】, startup exception is about to exit.`);
-      throw new Error(result.stderr);
-    }
-
-    console.log(`database driver:【${driver}】, ready to start migration.`);
-
-    await adapters[driver]();
-    console.log(`database driver:【${driver}】, migration success.`);
+    await adapters[parsedTargets[0].driver]();
+    console.log('database migrations completed successfully.');
   });
 } catch (p) {
   console.error(`Exit code: ${p.exitCode}`);
   console.error(`Migrate Deploy Error: ${p.stderr}`);
-  await killMe();
+  await $`exit 1`;
 }

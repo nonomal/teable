@@ -1,14 +1,14 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ILinkFieldOptionsRo } from '@teable/core';
 import { Relationship } from '@teable/core';
-import { ArrowUpRight } from '@teable/icons';
-import { getTablePermission } from '@teable/openapi';
+import { ArrowUpRight, ChevronDown } from '@teable/icons';
+import { getFields, getTablePermission } from '@teable/openapi';
 import { ReactQueryKeys } from '@teable/sdk/config';
 import { useBaseId, useTableId } from '@teable/sdk/hooks';
 import { Button, Label, Switch } from '@teable/ui-lib/shadcn';
 import Link from 'next/link';
 import { Trans, useTranslation } from 'next-i18next';
-import { Fragment, useState } from 'react';
+import { useState } from 'react';
 import { tableConfig } from '@/features/i18n/table.config';
 import { MoreLinkOptions } from './MoreLinkOptions';
 import { SelectTable } from './SelectTable';
@@ -42,10 +42,10 @@ export const LinkOptions = (props: {
     queryFn: ({ queryKey }) =>
       getTablePermission(queryKey[1], queryKey[2])
         .then((res) => res.data)
-        .catch(() => ({ field: { create: false } })),
+        .catch(() => undefined),
   });
 
-  const canCreateField = tablePermission?.field.create;
+  const canCreateField = tablePermission?.field?.['field|create'];
 
   const translation = {
     [Relationship.OneOne]: t('table:field.editor.oneToOne'),
@@ -80,16 +80,32 @@ export const LinkOptions = (props: {
     return relationship === Relationship.ManyMany || relationship === Relationship.ManyOne;
   };
 
+  const queryClient = useQueryClient();
+
+  const { mutate: getFieldListMutate } = useMutation({
+    mutationFn: (foreignTableId: string) => {
+      return getFields(foreignTableId).then((res) => res.data);
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(ReactQueryKeys.fieldList(foreignTableId!), data);
+      const primaryField = data.find((field) => field.isPrimary);
+      onChange?.({
+        ...options,
+        lookupFieldId: primaryField?.id,
+      });
+    },
+  });
+
   if (isLookup) {
     return <></>;
   }
 
   return (
-    <div className="flex w-full flex-col gap-2">
+    <div className="flex w-full flex-col gap-4 border-t pt-4">
       <SelectTable
         baseId={options?.baseId}
         tableId={options?.foreignTableId}
-        onChange={(baseId, tableId) => {
+        onChange={async (baseId, tableId) => {
           onChange?.({
             baseId,
             foreignTableId: tableId,
@@ -99,18 +115,22 @@ export const LinkOptions = (props: {
             visibleFieldIds: null,
             filter: null,
           });
+          if (tableId) {
+            await getFieldListMutate(tableId);
+          }
         }}
       />
       {options?.foreignTableId && (
-        <Fragment>
-          <div className="flex justify-end">
+        <div className="flex flex-col gap-2">
+          <div className="flex justify-start">
             <Button
               size="xs"
-              variant="link"
-              className="text-xs text-slate-500 underline"
+              variant="outline"
+              className=""
               onClick={() => setMoreVisible(!moreVisible)}
             >
               {t('table:field.editor.moreOptions')}
+              <ChevronDown className="size-3 " />
             </Button>
           </div>
           {moreVisible && (
@@ -120,17 +140,17 @@ export const LinkOptions = (props: {
               filterByViewId={options?.filterByViewId}
               visibleFieldIds={options?.visibleFieldIds}
               filter={options?.filter}
+              lookupFieldId={options?.lookupFieldId}
               onChange={(partialOptions: Partial<ILinkFieldOptionsRo>) => {
                 onChange?.({ ...options, ...partialOptions });
               }}
             />
           )}
-        </Fragment>
+        </div>
       )}
       {foreignTableId && (
-        <>
-          <hr className="my-2" />
-          <div className="flex space-x-2 pt-1">
+        <div className="flex flex-col gap-2 border-t pt-4">
+          <div className="flex h-8 items-center space-x-2 rtl:space-x-reverse">
             <Switch
               id="field-options-one-way-link"
               checked={!isOneWay}
@@ -143,7 +163,7 @@ export const LinkOptions = (props: {
               {t('table:field.editor.createSymmetricLink')}
             </Label>
           </div>
-          <div className="flex space-x-2 pt-1">
+          <div className="flex h-8 items-center space-x-2 rtl:space-x-reverse">
             <Switch
               id="field-options-self-multi"
               checked={isLeftMulti(relationship)}
@@ -155,7 +175,7 @@ export const LinkOptions = (props: {
               {t('table:field.editor.allowLinkMultipleRecords')}
             </Label>
           </div>
-          <div className="flex space-x-2 pt-1">
+          <div className="flex h-8 items-center space-x-2 rtl:space-x-reverse">
             <Switch
               id="field-options-sym-multi"
               checked={isRightMulti(relationship)}
@@ -169,32 +189,36 @@ export const LinkOptions = (props: {
                 : t('table:field.editor.allowSymmetricFieldLinkMultipleRecords')}
             </Label>
           </div>
-          <p className="pt-2">
-            <Trans
-              ns="table"
-              i18nKey="field.editor.linkTipMessage"
-              components={{ b: <b />, span: <span />, br: <br /> }}
-              values={{
-                relationship: translation[relationship],
-                linkType:
-                  tableId === foreignTableId
-                    ? t('table:field.editor.inSelfLink')
-                    : t('table:field.editor.betweenTwoTables'),
-              }}
-            />
-          </p>
-        </>
+          <div className="border-1 flex flex-col items-end gap-2 rounded-md border bg-secondary p-3 text-sm">
+            <div className="flex w-full items-center justify-between">
+              <p className="text-sm font-semibold">{t('table:field.editor.tips')}</p>
+              <Link
+                className="flex items-center text-xs hover:underline"
+                href={t('table:field.editor.linkFieldKnowMoreLink')}
+                target="_blank"
+              >
+                {t('table:field.editor.knowMore')}
+                <ArrowUpRight className="size-4" />
+              </Link>
+            </div>
+
+            <p className="w-full text-[13px]">
+              <Trans
+                ns="table"
+                i18nKey="field.editor.linkTipMessage"
+                components={{ b: <b />, span: <span />, br: <br /> }}
+                values={{
+                  relationship: translation[relationship],
+                  linkType:
+                    tableId === foreignTableId
+                      ? t('table:field.editor.inSelfLink')
+                      : t('table:field.editor.betweenTwoTables'),
+                }}
+              />
+            </p>
+          </div>
+        </div>
       )}
-      <div>
-        <Link
-          className="mt-4 flex items-center text-xs underline"
-          href={t('table:field.editor.linkFieldKnowMoreLink')}
-          target="_blank"
-        >
-          <ArrowUpRight className="size-4" />
-          {t('table:field.editor.knowMore')}
-        </Link>
-      </div>
     </div>
   );
 };

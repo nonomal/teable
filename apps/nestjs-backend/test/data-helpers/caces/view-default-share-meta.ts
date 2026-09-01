@@ -7,14 +7,16 @@ export const VIEW_DEFAULT_SHARE_META: {
 }[] = [
   {
     viewType: ViewType.Form,
-    defaultShareMeta: {
-      submit: {
-        allow: true,
-      },
-    },
+    defaultShareMeta: {},
   },
   {
     viewType: ViewType.Kanban,
+    defaultShareMeta: {
+      includeRecords: true,
+    },
+  },
+  {
+    viewType: ViewType.Gallery,
     defaultShareMeta: {
       includeRecords: true,
     },

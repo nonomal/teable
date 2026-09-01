@@ -1,63 +1,50 @@
 import 'dayjs/plugin/timezone';
 import 'dayjs/plugin/utc';
-import fs from 'fs';
-import path from 'path';
 import type { INestApplication } from '@nestjs/common';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
-import { WsAdapter } from '@nestjs/platform-ws';
-import type { OpenAPIObject } from '@nestjs/swagger';
-import { SwaggerModule } from '@nestjs/swagger';
-import { getOpenApiDocumentation } from '@teable/openapi';
+import { isDomainError, toError } from '@teable/v2-core';
 import { json, urlencoded } from 'express';
 import helmet from 'helmet';
 import isPortReachable from 'is-port-reachable';
+import { ClsService } from 'nestjs-cls';
 import { Logger } from 'nestjs-pino';
-import type { RedocOptions } from 'nestjs-redoc';
-import { RedocModule } from 'nestjs-redoc';
 import { AppModule } from './app.module';
 import type { IBaseConfig } from './configs/base.config';
 import type { ISecurityWebConfig, IApiDocConfig } from './configs/bootstrap.config';
 import { GlobalExceptionFilter } from './filter/global-exception.filter';
-import otelSDK from './tracing';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-declare const module: any;
+import { setupSwagger } from './swagger';
+import type { IClsStore } from './types/cls';
+import { relaxOAuthPopupCoop } from './utils/oauth-popup-coop';
 
 const host = 'localhost';
 
 export async function setUpAppMiddleware(app: INestApplication, configService: ConfigService) {
-  app.useWebSocketAdapter(new WsAdapter(app));
-  app.useGlobalFilters(new GlobalExceptionFilter(configService));
+  app.useGlobalFilters(
+    new GlobalExceptionFilter(configService, app.get<ClsService<IClsStore>>(ClsService))
+  );
   app.useGlobalPipes(
     new ValidationPipe({ transform: true, stopAtFirstError: true, forbidUnknownValues: false })
   );
-  app.use(helmet());
+  // HSTS is configured at the WAF level. Disable it here to avoid sending duplicate
+  // `Strict-Transport-Security` headers with potentially different max-age values.
+  app.use(helmet({ hsts: false }));
+  app.use(relaxOAuthPopupCoop);
   app.use(json({ limit: '50mb' }));
   app.use(urlencoded({ limit: '50mb', extended: true }));
 
   const apiDocConfig = configService.get<IApiDocConfig>('apiDoc');
   const securityWebConfig = configService.get<ISecurityWebConfig>('security.web');
   const baseConfig = configService.get<IBaseConfig>('base');
+
+  // req.ip must resolve the real client IP from X-Forwarded-For (audit logs,
+  // per-IP rate limiting); see parseTrustProxy for the BACKEND_TRUST_PROXY contract.
+  if (securityWebConfig) {
+    app.getHttpAdapter().getInstance().set('trust proxy', securityWebConfig.trustProxy);
+  }
   if (!apiDocConfig?.disabled) {
-    const openApiDocumentation = await getOpenApiDocumentation({
-      origin: baseConfig?.publicOrigin,
-      snippet: apiDocConfig?.enabledSnippet,
-    });
-
-    const jsonString = JSON.stringify(openApiDocumentation);
-    fs.writeFileSync(path.join(__dirname, '/openapi.json'), jsonString);
-    SwaggerModule.setup('/docs', app, openApiDocumentation as OpenAPIObject);
-
-    // Instead of using SwaggerModule.setup() you call this module
-    const redocOptions: RedocOptions = {
-      logo: {
-        backgroundColor: '#F0F0F0',
-        altText: 'Teable logo',
-      },
-    };
-    await RedocModule.setup('/redocs', app, openApiDocumentation as OpenAPIObject, redocOptions);
+    await setupSwagger(app, baseConfig?.publicOrigin ?? '', apiDocConfig?.enabledSnippet ?? false);
   }
 
   if (securityWebConfig?.cors.enabled) {
@@ -66,15 +53,8 @@ export async function setUpAppMiddleware(app: INestApplication, configService: C
 }
 
 export async function bootstrap() {
-  otelSDK.start();
-
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   const configService = app.get(ConfigService);
-
-  if (module.hot) {
-    module.hot.accept();
-    module.hot.dispose(() => app.close());
-  }
 
   const logger = app.get(Logger);
   app.useLogger(logger);
@@ -105,9 +85,13 @@ export async function bootstrap() {
   logger.log(`> System Time Zone: ${timeZone}`);
   logger.log(`> Current System Time: ${now.toString()}`);
 
-  process.on('unhandledRejection', (reason: string, promise: Promise<unknown>) => {
-    logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
-    throw reason;
+  process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+    // DomainError is intentionally a POJO (Result-based, not thrown). If one
+    // still escapes as an unhandled rejection, wrap it so Sentry gets a real
+    // stack-bearing Error instead of collapsing into activeSpanWrapper.
+    const normalized = isDomainError(reason) ? toError(reason) : reason;
+    logger.error(`Unhandled Rejection at: ${promise}, reason: ${normalized}`);
+    throw normalized;
   });
 
   process.on('uncaughtException', (error) => {

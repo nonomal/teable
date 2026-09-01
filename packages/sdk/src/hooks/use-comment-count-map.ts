@@ -1,10 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { IdPrefix, getTableCommentChannel } from '@teable/core';
 import type { IGetRecordsRo, ICommentCountVo } from '@teable/openapi';
-import { getCommentCount, CommentPatchType } from '@teable/openapi';
+import { getCommentCount, CommentPatchType, saveQueryParams } from '@teable/openapi';
 import { get } from 'lodash';
 import { useMemo, useEffect, useState } from 'react';
+import { LARGE_QUERY_THRESHOLD } from '../components/grid-enhancements/hooks/constant';
 import { ReactQueryKeys } from '../config';
+import { useCommentPermission } from './use-comment-permission';
 import { useConnection } from './use-connection';
 import { useSearch } from './use-search';
 import { useTableId } from './use-table-id';
@@ -18,26 +20,41 @@ export const useCommentCountMap = (query?: IGetRecordsRo) => {
 
   const view = useView();
 
-  const { searchQuery } = useSearch();
+  const { filteringSearchQuery } = useSearch();
 
   const { connection } = useConnection();
+  // Whoever cannot open the comments has no business knowing they exist: the
+  // count badge follows the same gate as the panel (share links included).
+  const { commentReadable } = useCommentPermission();
 
   const queryParams = useMemo<IGetRecordsRo>(() => {
     return {
       viewId,
-      search: searchQuery,
+      search: filteringSearchQuery,
       type: IdPrefix.Record,
       ...query,
-      groupBy: query?.groupBy ? JSON.stringify(query?.groupBy) : query?.groupBy,
-      filter: view?.filter ? JSON.stringify(view?.filter) : view?.filter,
-      orderBy: view?.sort?.sortObjs ? JSON.stringify(view?.sort?.sortObjs) : view?.sort?.sortObjs,
+      groupBy: query?.groupBy,
+      filter: view?.filter,
+      orderBy: view?.sort?.sortObjs,
     } as IGetRecordsRo;
-  }, [query, searchQuery, viewId, view]);
+  }, [query, filteringSearchQuery, viewId, view]);
 
   const { data } = useQuery({
     queryKey: ReactQueryKeys.commentCount(tableId!, queryParams),
-    queryFn: () => getCommentCount(tableId!, queryParams).then(({ data }) => data),
-    enabled: !!tableId,
+    queryFn: async () => {
+      const { collapsedGroupIds, ...rest } = queryParams;
+
+      if (collapsedGroupIds && collapsedGroupIds.length > LARGE_QUERY_THRESHOLD) {
+        const { data } = await saveQueryParams({ params: { collapsedGroupIds } });
+        return getCommentCount(tableId!, {
+          ...rest,
+          collapsedGroupIds: undefined,
+          queryId: data.queryId,
+        }).then(({ data }) => data);
+      }
+      return getCommentCount(tableId!, queryParams).then(({ data }) => data);
+    },
+    enabled: !!tableId && commentReadable,
   });
 
   const [commentCount, setCommentCount] = useState<ICommentCountVo>([]);
@@ -47,7 +64,7 @@ export const useCommentCountMap = (query?: IGetRecordsRo) => {
   }, [data]);
 
   useEffect(() => {
-    if (!tableId) {
+    if (!tableId || !commentReadable) {
       return;
     }
 
@@ -90,7 +107,7 @@ export const useCommentCountMap = (query?: IGetRecordsRo) => {
       presence?.listenerCount('receive') === 0 && presence?.unsubscribe();
       presence?.listenerCount('receive') === 0 && presence?.destroy();
     };
-  }, [connection, tableId]);
+  }, [connection, tableId, commentReadable]);
 
   return useMemo(() => {
     return Object.fromEntries(commentCount.map((item) => [item.recordId, item.count]));

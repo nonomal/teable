@@ -1,47 +1,35 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import type { IRecord } from '@teable/core';
 import { RecordCore, FieldKeyType, RecordOpBuilder, FieldType } from '@teable/core';
-import type {
-  ICreateRecordsRo,
-  IGetRecordsRo,
-  IUpdateRecordRo,
-  IUpdateRecordsRo,
-} from '@teable/openapi';
-import {
-  createRecords,
-  getRecords,
-  updateRecord,
-  updateRecordOrders,
-  updateRecords,
-} from '@teable/openapi';
-import { isEqual } from 'lodash';
+import { updateRecord } from '@teable/openapi';
+import { sonner } from '@teable/ui-lib';
+import { isEqual, isEmpty } from 'lodash';
 import type { Doc } from 'sharedb/lib/client';
-import { requestWrap } from '../../utils/requestWrap';
+import { getHttpErrorMessage } from '../../context';
+import type { ILocaleFunction } from '../../context/app/i18n';
+import { normalizeCellValueForDisplay } from '../../utils/normalize-cell-value';
 import type { IFieldInstance } from '../field/factory';
 
+const { toast } = sonner;
 export class Record extends RecordCore {
+  // set by useRecords' factory for doc-less (seeded) instances so cell edits
+  // can still resolve their REST endpoint before the subscription doc arrives
+  tableId?: string;
+
   private _title?: {
     value?: string;
   };
 
-  static createRecords = requestWrap((tableId: string, recordsRo: ICreateRecordsRo) =>
-    createRecords(tableId, recordsRo)
-  );
+  private normalizeCellValue(fieldId: string) {
+    const cellValue = this.fields[fieldId];
+    const field = this.fieldMap?.[fieldId];
 
-  static getRecords = requestWrap((tableId: string, query?: IGetRecordsRo) =>
-    getRecords(tableId, query)
-  );
+    if (!field) {
+      return cellValue;
+    }
 
-  static updateRecord = requestWrap(
-    (tableId: string, recordId: string, recordRo: IUpdateRecordRo) =>
-      updateRecord(tableId, recordId, recordRo)
-  );
-
-  static updateRecords = requestWrap((tableId: string, recordsRo: IUpdateRecordsRo) =>
-    updateRecords(tableId, recordsRo)
-  );
-
-  static updateRecordOrders = requestWrap(updateRecordOrders);
+    return normalizeCellValueForDisplay(field, cellValue);
+  }
 
   constructor(
     protected doc: Doc<IRecord>,
@@ -61,32 +49,104 @@ export class Record extends RecordCore {
         return undefined;
       }
       this._title = {
-        value: primaryField.cellValue2String(this.fields[primaryFieldId]),
+        value: primaryField.cellValue2String(this.normalizeCellValue(primaryFieldId)),
       };
     }
     return this._title.value;
   }
 
-  private onCommitLocal(fieldId: string, cellValue: unknown, undo?: boolean) {
+  override getCellValue(fieldId: string): unknown {
+    return this.normalizeCellValue(fieldId);
+  }
+
+  override getCellValueAsString(fieldId: string) {
+    return this.fieldMap[fieldId].cellValue2String(this.normalizeCellValue(fieldId));
+  }
+
+  static isLocked(permissions: Record['permissions'], fieldId: string) {
+    if (!isEmpty(permissions)) {
+      return !permissions?.update?.[fieldId];
+    }
+    return false;
+  }
+
+  static isHidden(permissions: Record['permissions'], fieldId: string) {
+    if (!isEmpty(permissions)) {
+      return !permissions?.read?.[fieldId];
+    }
+    return false;
+  }
+
+  isLocked(fieldId: string) {
+    return Record.isLocked(this.permissions, fieldId);
+  }
+
+  isHidden(fieldId: string) {
+    return Record.isHidden(this.permissions, fieldId);
+  }
+
+  private onCommitLocal(fieldId: string, cellValue: unknown, _undo?: boolean) {
     const oldCellValue = this.fields[fieldId];
+    if (!this.doc?.data) {
+      // doc-less (seeded) instance: no local doc to mirror — update the
+      // in-memory value only; the subscription snapshot supersedes it
+      this.fields[fieldId] = cellValue;
+      return;
+    }
     const operation = RecordOpBuilder.editor.setRecord.build({
       fieldId,
       newCellValue: cellValue,
       oldCellValue,
     });
+    // Local-only optimistic write. Do not bump doc.version: the server will
+    // publish the real record op at the correct version (e.g. v2-projection).
+    // A fake version++ can make that op look stale/duplicate and leave the
+    // cell blank until a full refresh.
     this.doc.data.fields[fieldId] = cellValue;
     this.doc.emit('op batch', [operation], false);
-    if (this.doc.version) {
-      undo ? this.doc.version-- : this.doc.version++;
-    }
     this.fields[fieldId] = cellValue;
   }
 
-  private updateComputedField = async (fieldIds: string[], record: IRecord) => {
-    const changeCellFieldIds = fieldIds.filter(
-      (fieldId) => !isEqual(this.fields[fieldId], record.fields[fieldId])
+  private isResolvedLinkCellValue(cellValue: unknown) {
+    if (cellValue == null) {
+      return false;
+    }
+
+    const values = Array.isArray(cellValue) ? cellValue : [cellValue];
+    if (!values.length) {
+      return false;
+    }
+
+    return values.every(
+      (value) =>
+        value != null &&
+        typeof value === 'object' &&
+        typeof (value as { title?: unknown }).title === 'string'
     );
+  }
+
+  private updateComputedField = async (fieldIds: string[], record: IRecord) => {
+    const changeCellFieldIds = fieldIds.filter((fieldId) => {
+      // Skip if the new value is undefined - computed field hasn't been updated yet (V2 async)
+      // This prevents clearing computed fields that will be updated via ShareDB op
+      if (record.fields[fieldId] === undefined) {
+        return false;
+      }
+      // V2 update responses can include stored link values without titles.
+      if (
+        this.fieldMap[fieldId]?.type === FieldType.Link &&
+        !this.isResolvedLinkCellValue(record.fields[fieldId])
+      ) {
+        return false;
+      }
+      return !isEqual(this.fields[fieldId], record.fields[fieldId]);
+    });
     if (!changeCellFieldIds.length) {
+      return;
+    }
+    if (!this.doc?.data) {
+      // doc-less (seeded) instance: computed values arrive with the
+      // subscription snapshot instead
       return;
     }
     changeCellFieldIds.forEach((fieldId) => {
@@ -95,30 +155,43 @@ export class Record extends RecordCore {
     this.doc.emit('op batch', [], false);
   };
 
-  async updateCell(fieldId: string, cellValue: unknown) {
+  async updateCell(
+    fieldId: string,
+    cellValue: unknown,
+    localization?: { t: ILocaleFunction; prefix?: string }
+  ) {
     const oldCellValue = this.fields[fieldId];
     try {
       this.onCommitLocal(fieldId, cellValue);
       this.fields[fieldId] = cellValue;
-      const [, tableId] = this.doc.collection.split('_');
-      const res = await Record.updateRecord(tableId, this.doc.id, {
-        fieldKeyType: FieldKeyType.Id,
-        record: {
-          fields: {
-            // you have to set null to clear the value
-            [fieldId]: cellValue === undefined ? null : cellValue,
-          },
-        },
-      });
-      const computedField = Object.keys(this.fieldMap).filter(
-        (fieldId) =>
-          this.fieldMap[fieldId].type === FieldType.Link || this.fieldMap[fieldId].isComputed
-      );
-      if (computedField.length) {
-        this.updateComputedField(computedField, res.data);
+      const normalizedFields = {
+        // you have to set null to clear the value
+        [fieldId]: cellValue === undefined ? null : cellValue,
+      };
+      const tableId = this.doc ? this.doc.collection.split('_')[1] : this.tableId;
+      if (!tableId) {
+        throw new Error('Cannot update record: missing table context');
       }
+      const res = await updateRecord(tableId, this.id, {
+        fieldKeyType: FieldKeyType.Id,
+        record: { fields: normalizedFields },
+      });
+      const computedFieldIds = Object.keys(this.fieldMap).filter(
+        (fId) => this.fieldMap[fId].type === FieldType.Link || this.fieldMap[fId].isComputed
+      );
+      const fieldsToSync = new Set(computedFieldIds);
+      // Only sync the edited field for types with server-enriched properties (e.g., presignedUrl for attachments)
+      if (this.fieldMap[fieldId]?.type === FieldType.Attachment) {
+        fieldsToSync.add(fieldId);
+      }
+      this.updateComputedField([...fieldsToSync], res.data);
     } catch (error) {
       this.onCommitLocal(fieldId, oldCellValue, true);
+
+      if (error instanceof Error && localization) {
+        toast.error(getHttpErrorMessage(error, localization.t, localization.prefix));
+      }
+
       return error;
     }
   }

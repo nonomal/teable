@@ -12,6 +12,7 @@ import {
 } from '@teable/ui-lib';
 import { useTranslation } from '../../../context/app/i18n';
 import { useTables } from '../../../hooks';
+import { useContentDir } from '../../../hooks/use-content-dir';
 import { FormItem } from '../FormItem';
 
 export const QueryFrom = (props: {
@@ -23,6 +24,7 @@ export const QueryFrom = (props: {
   const tables = useTables();
   const { addButton, children, onClick, maxDepth } = props;
   const { t } = useTranslation();
+  const contentDir = useContentDir();
 
   return (
     <div className="mb-4 flex gap-5 text-sm">
@@ -33,7 +35,7 @@ export const QueryFrom = (props: {
               <DropdownMenuTrigger asChild>
                 <Button className="text-[13px]" variant="outline" size={'xs'}>
                   {t('baseQuery.add')}
-                  <Plus />
+                  <Plus className="size-4 shrink-0" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent className="w-56">
@@ -41,7 +43,7 @@ export const QueryFrom = (props: {
                   <div className="max-h-80 overflow-y-auto">
                     {tables.map((table) => (
                       <DropdownMenuItem key={table.id} onClick={() => onClick?.('table', table.id)}>
-                        {table.name}
+                        <span dir={contentDir}>{table.name}</span>
                       </DropdownMenuItem>
                     ))}
                   </div>
@@ -58,7 +60,7 @@ export const QueryFrom = (props: {
                               key={table.id}
                               onClick={() => onClick?.('table', table.id)}
                             >
-                              {table.name}
+                              <span dir={contentDir}>{table.name}</span>
                             </DropdownMenuItem>
                           ))}
                         </DropdownMenuSubContent>

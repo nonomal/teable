@@ -1,0 +1,412 @@
+{
+  "crossSpace": {
+    "duplicateBaseTitle": "Hinweis",
+    "duplicateBaseDescription": "Bereichsübergreifende Verweise werden nicht unterstützt. Das Duplikat wird in ein einzeiliges Textfeld umgewandelt.",
+    "affectedTableSuffix": "({{count}} Feld(er))",
+    "convertAndDuplicate": "Umwandeln & duplizieren"
+  },
+  "initialSpaceName": "{{name}}' Space",
+  "action": {
+    "createBase": "Base erstellen",
+    "createSpace": "Eine Base erstellen",
+    "invite": "Einladen",
+    "startFromScratch": "Von Grund auf neu beginnen"
+  },
+  "allSpaces": "Alle Spaces",
+  "emptySpaceTitle": "Keine Bases in diesem Space",
+  "spaceIsEmpty": "Erstellen Sie Ihre erste Base, um zu starten",
+  "baseModal": {
+    "copy": "Kopieren",
+    "duplicate": "Dupliziere \"{{baseName}}\"",
+    "createBaseFromTemplate": "Eine Basis aus einer Vorlage erstellen",
+    "duplicateRecords": "Dupliziere Einträge",
+    "duplicateRecordsTip": "Ihre Änderungshistorie wird nicht dupliziert.",
+    "toSpace": "Zu Space",
+    "copyToSpace": "Kopiere zu Space",
+    "duplicateBase": "Dupliziere Base",
+    "missTargetTip": "Bitte wählen Sie ein Feld, um die Base zu duplizieren.",
+    "copying": "Duplizieren der Base, das kann eine Weile dauern...",
+    "howToCreate": "Wie wollen Sie beginnen?",
+    "fromScratch": "Von Grund auf neu",
+    "fromTemplate": "Aus Vorlage",
+    "moveBaseToAnotherSpace": "Verschiebe {{baseName}} zu einem anderen Space",
+    "chooseSpace": "Space auswählen",
+    "duplicateBaseSucceedAndJump": "Erfolg, zum Öffnen klicken"
+  },
+  "spaceSetting": {
+    "title": "Space Einstellungen",
+    "general": "Allgemein",
+    "collaborators": "Kollaborateure",
+    "generalDescription": "Ändern Sie hier die Einstellungen für Ihren aktuellen Space",
+    "spaceName": "Space Name",
+    "spaceId": "Space ID",
+    "importBase": "Importieren"
+  },
+  "collaborators": "Mitarbeitende",
+  "more": "Mehr",
+  "pin": {
+    "add": "Anpinnen",
+    "remove": "Pin entfernen",
+    "pin": "Pin",
+    "empty": "Ihre gepinnten Bases und Spaces werden hier erscheinen"
+  },
+  "tooltip": {
+    "noPermissionToCreateBase": "Sie haben keine Berechtigung, eine Base zu erstellen"
+  },
+  "tip": {
+    "delete": "Sind Sie sicher, dass Sie <0/> löschen wollen?",
+    "exportTips2": "Sie können die .tea-Datei in Space -> mehr -> Import importieren",
+    "exportTips3": "Base-übergreifende Beziehungsfelder werden in einzeiligen Text umgewandelt.",
+    "exportIncludeDataLabel": "Datensätze einschließen",
+    "exportIncludeDataDescription": "Beim Deaktivieren nur Struktur und Konfiguration exportieren",
+    "exportTitle": "Exportieren",
+    "exportDescription": "Die aktuelle Datenbank als .tea-Datei exportieren, dies kann einige Zeit dauern.",
+    "exportStartButton": "Export starten",
+    "exportSlowTip": "Die Datenmenge ist groß. Der Export kann eine Weile dauern. Sie können vorübergehend die Seite verlassen.",
+    "exportReadyDescription": "Bitte laden Sie die .tea-Datei herunter, {{importHint}}",
+    "moveBaseSuccessTitle": "Verschiebung erfolgreich",
+    "moveBaseSuccessDescription": "{{baseName}} wurde erfolgreich nach {{spaceName}} verschoben",
+    "moveBaseCrossSpaceTitle": "Hinweis",
+    "moveBaseCrossSpaceDataLossWarning": "Bereichsübergreifende Verweise werden nicht unterstützt. Die betroffenen Felder werden in Textfelder umgewandelt. Diese Aktion kann nicht rückgängig gemacht werden.",
+    "moveBaseCrossDataDbTitle": "Verschieben zwischen Datenbanken",
+    "moveBaseCrossDataDbWarning": "Der Quell- und der Ziel-Space verwenden unterschiedliche Datenbanken. Bei diesem Verschieben werden die Base-Daten in die Zieldatenbank kopiert, was eine Weile dauern kann. Schreibvorgänge auf diese Base sind während der Übertragung pausiert.",
+    "moveBaseProgressTitle": "Base wird verschoben…",
+    "moveBaseProgressPhase": "Phase: {{phase}}",
+    "moveBaseProgressPercent": "{{percent}} %",
+    "moveBaseFailedTitle": "Verschieben fehlgeschlagen",
+    "moveBaseFailedDescription": "Phase {{phase}}: {{error}}",
+    "moveBaseRetry": "Erneut versuchen",
+    "moveBaseCancel": "Abbrechen"
+  },
+  "deleteSpaceModal": {
+    "title": "Space löschen",
+    "blockedTitle": "Dieser Space kann nicht gelöscht werden",
+    "blockedDesc": "Dieser Space hat ein aktives Abonnement. Bitte kündigen Sie das Abonnement, bevor Sie den Space löschen."
+  },
+  "sharedBase": {
+    "title": "Geteilte Bases",
+    "description": "Alle Bases, zu denen ich eingeladen wurde",
+    "empty": "Noch keine geteilten Bases"
+  },
+  "aiSetting": {
+    "title": "KI-Einstellungen",
+    "description": "Verwalten Sie die KI-Einstellungen Ihres Space",
+    "enable": "KI-Einstellungen initialisieren"
+  },
+  "import": {
+    "importing": "Importieren",
+    "baseImportTips": "Klicken oder ziehen Sie die .tea-Datei in diesen Bereich zum Hochladen",
+    "confirm": "Bestätigen und fortfahren",
+    "phase": {
+      "importingV2": "Wird importiert",
+      "parsingStructure": "Parsing structure",
+      "creatingBase": "Creating base: {{detail}}",
+      "creatingTable": "Creating table: {{detail}}",
+      "tableStructureStarted": "Tabellenstruktur wird vorbereitet: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "tableStructureValidating": "Tabellenbeziehungen werden geprüft",
+      "tableStructureCommitting": "Tabellenstruktur wird gespeichert",
+      "tableStructureDone": "Tabellenstruktur gespeichert: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "tableStructureData": "Tabellenstruktur",
+      "tableStructureTablesProgress": "{{count}}/{{total}} Tabellen vorbereitet",
+      "tableStructureTablesDone": "{{count}}/{{total}} Tabellen gespeichert",
+      "creatingCommonFields": "Creating basic fields for {{table}}: {{fields}}",
+      "creatingButtonFields": "Creating button fields for {{table}}: {{fields}}",
+      "creatingFormulaFields": "Creating formula fields for {{table}}: {{fields}}",
+      "creatingLinkFields": "Creating link fields for {{table}}: {{fields}}",
+      "creatingLookupFields": "Creating lookup fields for {{table}}: {{fields}}",
+      "creatingTableViews": "Creating views for {{table}}: {{fields}}",
+      "creatingPlugins": "Creating plugins",
+      "creatingFolders": "Creating folders",
+      "creatingWorkflows": "Creating workflows",
+      "creatingApps": "Creating apps",
+      "creatingAuthorityMatrix": "Creating authority matrix",
+      "restoringBaseNodes": "Ordnerhierarchie wird wiederhergestellt",
+      "queuingAttachments": "Queuing attachment uploads",
+      "uploadingAppFiles": "Uploading app files",
+      "queuingDataImport": "Queuing data import",
+      "importingTableData": "Tabellendaten werden importiert",
+      "restoringLinkRelations": "Verknüpfte Datensätze werden wiederhergestellt",
+      "tableDataStarted": "Datensätze werden importiert: {{tableName}}",
+      "tableDataProgress": "Datensätze werden importiert: {{tableName}}",
+      "tableDataDone": "Datensatzimport abgeschlossen: {{tableName}}",
+      "linkFieldsData": "Daten verknüpfter Datensätze",
+      "linkFieldsProgress": "Verknüpfte Datensätze werden wiederhergestellt",
+      "linkFieldsDone": "Verknüpfte Datensätze wiederhergestellt",
+      "tableDataRowsProgress": "{{count}} Zeilen importiert",
+      "tableDataRowsDone": "{{count}} Zeilen importiert",
+      "tableDataRowsTotalProgress": "{{count}}/{{total}} Zeilen verarbeitet",
+      "tableDataRowsTotalDone": "{{count}}/{{total}} Zeilen verarbeitet",
+      "tableDataBatch": "Batch {{batch}}",
+      "tableDataBatchRows": "{{count}} Zeilen in diesem Batch",
+      "tableDataEmpty": "Keine Tabellendaten zum Importieren",
+      "done": "Import completed",
+      "clickToView": "Klicken zum Anzeigen"
+    }
+  },
+  "export": {
+    "phase": {
+      "preparing": "Export wird vorbereitet",
+      "exportingArchive": "Exportdatei wird erstellt",
+      "exportingStructure": "Struktur wird exportiert",
+      "exportingAttachments": "Anhänge werden exportiert",
+      "exportingAttachmentMetadata": "Anhang-Metadaten werden exportiert",
+      "exportingTableData": "Datensätze werden exportiert",
+      "tableDataStarted": "Datensätze werden exportiert: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "tableDataProgress": "Datensätze werden exportiert: {{tableName}}",
+      "tableDataDone": "Datensatzexport abgeschlossen: {{tableName}}",
+      "exportingExtraFiles": "Zusätzliche Dateien werden exportiert",
+      "exportingAppFiles": "App-Dateien werden exportiert",
+      "uploadingArchive": "Exportdatei wird hochgeladen",
+      "generatingDownloadUrl": "Download-Link wird erstellt",
+      "rowsProgress": "{{count}} Zeilen exportiert",
+      "done": "Export abgeschlossen"
+    }
+  },
+  "template": {
+    "title": "Vorlage",
+    "description": "Erstellen Sie schnell eine neue Base aus einer Vorlage",
+    "noTemplatesAvailable": "Keine Vorlagen verfügbar",
+    "noTemplatesDescription": "Hier gibt es derzeit nichts"
+  },
+  "recentlyBase": {
+    "title": "Zuletzt besucht"
+  },
+  "noBases": {
+    "title": "Hallo {{userName}}!",
+    "description": "Lassen Sie uns mit der Verwaltung Ihrer Arbeit in Ihrer ersten Base beginnen."
+  },
+  "noSpaces": {
+    "title": "Hallo {{userName}}!",
+    "description": "Erstellen Sie Ihren ersten Space, um Ihre Reise der Datenzusammenarbeit zu beginnen."
+  },
+  "baseList": {
+    "allBases": "Alle Bases",
+    "creator": "Ersteller",
+    "createdTime": "Erstellt",
+    "lastOpened": "Zuletzt geöffnet",
+    "enter": "Eintreten",
+    "noTables": "Keine Tabellen",
+    "empty": "Noch keine Bases",
+    "recent": "Zuletzt verwendet",
+    "manual": "Manuelle Reihenfolge"
+  },
+  "publishBase": {
+    "title": "Im Vorlagenzentrum veröffentlichen",
+    "description": "Veröffentlichen Sie Ihre Base mit einem Klick im Vorlagenzentrum! Lassen Sie mehr Menschen Ihre Kreativität sehen, nutzen und remixen, und bauen Sie gemeinsam ein leistungsstärkeres Geschäft auf",
+    "infoTitle": "Basisinformationen",
+    "form": {
+      "title": "Titel",
+      "description": "Beschreibung",
+      "security": "Sicherheit",
+      "advanced": "Erweitert",
+      "publishNode": "Knoten veröffentlichen",
+      "includeData": "Daten einschließen",
+      "defaultActiveNode": "Standardmäßig aktiver Knoten",
+      "descriptionPlaceholder": "Beschreibung",
+      "titlePlaceholder": "Titel"
+    },
+    "publishToCommunity": "Im Vorlagenzentrum veröffentlichen",
+    "publish": "Veröffentlichen",
+    "publishSuccess": "Veröffentlichung erfolgreich!",
+    "previewTips": "Zeigen Sie der Welt Ihre Arbeit",
+    "update": "Aktualisieren",
+    "unPublish": "Veröffentlichung aufheben",
+    "unPublishSuccess": "Veröffentlichung der Base erfolgreich aufgehoben!",
+    "unPublishConfirmTitle": "Veröffentlichung aufheben bestätigen",
+    "unPublishConfirmDescription": "Sind Sie sicher, dass Sie die Veröffentlichung dieser Base aufheben möchten? Sie wird nicht mehr im Vorlagenzentrum sichtbar sein.",
+    "uploadCover": "Klicken, um Titelbild hochzuladen",
+    "changeCover": "Klicken, um Titelbild zu ändern",
+    "uploading": "Bild wird hochgeladen...",
+    "uploadSuccess": "Bild erfolgreich hochgeladen",
+    "uploadFailed": "Hochladen fehlgeschlagen",
+    "invalidImageType": "Bitte wählen Sie eine Bilddatei",
+    "tips": {
+      "publishValidation": "Titel und Beschreibung sind erforderlich",
+      "atLeastOneNode": "Bitte wählen Sie mindestens einen Knoten zur Veröffentlichung"
+    },
+    "urlCopied": "URL in die Zwischenablage kopiert!",
+    "urlCopiedForDiscord": "URL in die Zwischenablage kopiert! Sie können sie in Discord einfügen.",
+    "featuredLabel": "Featured",
+    "unfeaturedLabel": "Unfeatured",
+    "featuredTip": "Offiziell als Featured ausgewählt. Ihre Vorlage wird mehr Aufmerksamkeit erhalten.",
+    "unfeaturedTip": "Noch nicht als Featured ausgewählt. Verbessern Sie weiter, um eine Chance auf Empfehlung zu haben. Lassen Sie mehr Menschen Ihre Arbeit sehen.",
+    "publishSuccessDescription": "Teilen Sie Ihre Arbeit mit der Welt",
+    "shareWith": "Teilen mit",
+    "unpublishedApps": {
+      "title": "Unveröffentlichte Apps erkannt",
+      "description": "Unveröffentlichte Apps können Fehler bei der Vorlagenvorschau verursachen. Veröffentlichen Sie sie jetzt oder fahren Sie trotzdem fort.",
+      "publishAll": "Alle veröffentlichen",
+      "publish": "Veröffentlichen",
+      "published": "Veröffentlicht",
+      "publishing": "Veröffentlichen...",
+      "notPublished": "Nicht veröffentlicht",
+      "publishFailed": "Veröffentlichung fehlgeschlagen",
+      "publishFailedTip1": "Überprüfen Sie, ob die Quell-App erfolgreich veröffentlicht werden kann",
+      "publishFailedTip2": "Versuchen Sie, diese Vorlage erneut zu veröffentlichen",
+      "ignoreAndContinue": "Ignorieren und fortfahren",
+      "goToFix": "Zur Behebung",
+      "redeploy": "Erneut bereitstellen",
+      "unnamedApp": "Unbenannte App"
+    }
+  },
+  "dataDb": {
+    "create": {
+      "title": "Datenbank für Daten",
+      "description": "Wählen Sie, wo dieser Space Base-Schemas und Datensätze speichert.",
+      "defaultHint": "Für die meisten Spaces empfohlen.",
+      "byodbOption": "Meine PostgreSQL-Datenbank verwenden",
+      "byodbHint": "Initialisiert diesen Space in einem internen Teable-Schema innerhalb Ihrer selbst verwalteten Datenbank.",
+      "urlLabel": "PostgreSQL-Verbindungs-URL",
+      "sslHint": "Verwenden Sie dieselben SSL-Parameter, die Ihr PostgreSQL-Server verlangt. Das Passwort wird nach dem Test nie wieder angezeigt.",
+      "testConnection": "Verbindung testen",
+      "testing": "Wird getestet...",
+      "retestRequired": "Nach dem Ändern der URL erneut testen.",
+      "databaseLabel": "Datenbank",
+      "databasePlaceholder": "Datenbank auswählen",
+      "databaseHint": "Wählen Sie die PostgreSQL-Datenbank für diesen Space und testen Sie die Verbindung erneut.",
+      "preflightPassed": "Verbindungsprüfungen bestanden",
+      "preflightFailed": "Verbindungsprüfungen fehlgeschlagen",
+      "missingCapabilities": "Fehlende Berechtigungen",
+      "testFailed": "Die Datenbankverbindung konnte nicht getestet werden.",
+      "errors": {
+        "INVALID_DATABASE_URL": {
+          "message": "Die PostgreSQL-Verbindungs-URL ist ungültig."
+        },
+        "PRIVATE_NETWORK_BLOCKED": {
+          "message": "Datenbank-Hosts in privaten Netzwerken sind standardmäßig blockiert.",
+          "remediation": "Setzen Sie TEABLE_SSRF_PROTECTION_DISABLED=true nur in vertrauenswürdigen selbst gehosteten Deployments."
+        },
+        "CONNECTION_FAILED": {
+          "message": "Verbindung zur Datenbank fehlgeschlagen.",
+          "remediation": "Prüfen Sie Host, Port, Datenbankname, Benutzername, Passwort und SSL-Parameter."
+        },
+        "IPV6_NETWORK_UNREACHABLE": {
+          "message": "Der Datenbank-Host wurde zu einer IPv6-Adresse aufgelöst, aber dieses Teable-Deployment kann IPv6-Netzwerke nicht erreichen.",
+          "remediation": "Verwenden Sie einen über IPv4 erreichbaren Datenbank-Endpunkt oder Connection Pooler, oder aktivieren Sie ausgehendes IPv6 für dieses Teable-Deployment."
+        },
+        "PRIVILEGE_CHECK_FAILED": {
+          "message": "Die Prüfung der Datenbankberechtigungen ist fehlgeschlagen."
+        },
+        "DDL_PRIVILEGE_CHECK_FAILED": {
+          "message": "Dem Konto fehlen DDL-Berechtigungen, die zum Initialisieren einer Teable-Datenbank erforderlich sind.",
+          "remediation": "Erteilen Sie Berechtigungen zum Erstellen von Schemas, Tabellen, Funktionen und Triggern."
+        },
+        "NON_EMPTY_UNKNOWN_DATABASE": {
+          "message": "Das interne Schema von Teable enthält bereits Objekte, die nicht von Teable verwaltet werden.",
+          "remediation": "Verwenden Sie eine Datenbank ohne konfliktbehaftetes internes Schema oder entfernen Sie die unbekannten Objekte aus diesem Schema."
+        },
+        "INCOMPATIBLE_TEABLE_DATABASE": {
+          "message": "Diese Datenbank enthält unvollständige oder inkompatible Teable-Datenobjekte.",
+          "remediation": "Verwenden Sie eine leere Datenbank oder einen kompatiblen Migrations-/Adoptionsablauf für Teable-Datenbanken."
+        }
+      }
+    },
+    "fields": {
+      "host": "Host",
+      "database": "Datenbank",
+      "internalSchema": "Internes Schema",
+      "version": "Version",
+      "classification": "Klassifizierung"
+    },
+    "badge": {
+      "label": "Dediziert",
+      "tooltip": "Dieser Space liegt auf einer dedizierten Datenbank, isoliert von anderen Spaces"
+    }
+  },
+  "airtableImport": {
+    "title": "Aus Airtable importieren",
+    "close": "Schließen",
+    "pickBase": "Base zum Importieren auswählen",
+    "noBases": "Für diesen Token wurden keine zugänglichen Bases gefunden.",
+    "optionRecords": "Datensätze importieren",
+    "optionAttachments": "Anhänge herunterladen und importieren",
+    "import": "Import starten",
+    "done": "Import abgeschlossen",
+    "failed": "Import fehlgeschlagen",
+    "openBase": "Base öffnen",
+    "issuesSummary": "{{count}} Elemente wurden beim Import angepasst:",
+    "issuesMore": "+{{count}} weitere",
+    "issue": {
+      "fieldDegraded": "{{tableName}} / {{fieldName}}: {{fromType}} → {{toType}}",
+      "fieldSkipped": "{{tableName}} / {{fieldName}} ({{fromType}}) übersprungen: {{reason}}",
+      "viewSkipped": "{{tableName}} / Ansicht \"{{viewName}}\" ({{fromType}}) übersprungen",
+      "valuesDropped": "{{tableName}} / {{fieldName}}: {{count}} Werte verworfen ({{reason}})",
+      "viewConfigDegraded": "{{tableName}} / Ansicht \"{{viewName}}\": {{reason}}"
+    },
+    "phase": {
+      "fetchingSchema": "Airtable-Base-Struktur wird gelesen",
+      "creatingBase": "Base wird erstellt: {{detail}}",
+      "creatingTable": "Tabelle wird erstellt: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "creatingLinks": "Verknüpfungsfelder werden erstellt",
+      "fillingLinks": "{{tableName}} (Verknüpfungen)",
+      "applyingViewConfig": "Ansichtskonfiguration wird importiert"
+    },
+    "searchBases": "Bases durchsuchen",
+    "noSearchResults": "Keine Bases entsprechen der Suche.",
+    "detecting": "Airtable-Verbindung wird geprüft…",
+    "connectWithAirtable": "Airtable-Konto verbinden",
+    "waitingOAuth": "Autorisierung im Popup abschließen…",
+    "connectedAs": "Verbunden: {{account}}",
+    "permission": {
+      "create": "Ersteller",
+      "edit": "Bearbeiter",
+      "comment": "Kommentator",
+      "read": "Nur Lesen"
+    },
+    "integrationRequired": "Die Airtable-Integration ist auf dieser Instanz nicht konfiguriert. Bitte einen Administrator um Einrichtung.",
+    "optionViewConfig": "Ansichtsfilter, Sortierungen und Gruppierungen importieren",
+    "viewConfig": {
+      "help": "Die Airtable-API stellt keine Ansichtskonfiguration bereit, daher ist ein schreibgeschützter Freigabelink erforderlich.",
+      "helpStep1": "Öffnen Sie in Airtable das „Share“-Menü der Base",
+      "helpStep2": "Wählen Sie „Share to web“ und aktivieren Sie den vollständigen Base-Zugriff",
+      "helpStep3": "Kopieren Sie den schreibgeschützten Link und fügen Sie ihn oben ein",
+      "linkPlaceholder": "Freigabelink hier einfügen",
+      "mismatch": "Dieser Freigabelink verweist auf eine andere Base als die ausgewählte.",
+      "disableReminder": "Fertig – Sie können den Freigabelink in Airtable jetzt deaktivieren."
+    }
+  },
+  "googleSheetImport": {
+    "title": "Aus Google Sheets importieren",
+    "close": "Schließen",
+    "pickSpreadsheet": "Google-Tabelle zum Importieren auswählen",
+    "openPicker": "Tabelle aus Google Drive auswählen",
+    "changeSpreadsheet": "Ändern",
+    "analyzing": "Tabelle wird gelesen…",
+    "pickTabs": "Tabellenblätter zum Importieren auswählen",
+    "gridSize": "{{rows}} Zeilen × {{columns}} Spalten",
+    "optionRecords": "Datensätze importieren",
+    "import": "Import starten",
+    "done": "Import abgeschlossen",
+    "failed": "Import fehlgeschlagen",
+    "openBase": "Base öffnen",
+    "issuesSummary": "{{count}} Elemente wurden beim Import angepasst:",
+    "issuesMore": "+{{count}} weitere",
+    "recordsImported": "{{tableName}}: {{count}} Datensätze importiert",
+    "partialImported": "{{count}} Tabellen wurden vor dem Fehler vollständig importiert und bleiben erhalten",
+    "issue": {
+      "valuesDropped": "{{sheetName}} / {{fieldName}}: {{count}} Werte verworfen ({{reason}})",
+      "sheetSkipped": "Tabellenblatt \"{{sheetName}}\" übersprungen: {{reason}}",
+      "columnsTruncated": "{{sheetName}}: {{count}} Spalten über dem Spaltenlimit wurden nicht importiert"
+    },
+    "phase": {
+      "fetchingSchema": "Struktur der Tabelle wird gelesen",
+      "creatingBase": "Base wird erstellt: {{detail}}",
+      "creatingTable": "Tabelle wird erstellt: {{tableName}} ({{tableIndex}}/{{totalTables}})"
+    },
+    "detecting": "Google-Verbindung wird geprüft…",
+    "connectWithGoogle": "Google-Konto verbinden",
+    "waitingOAuth": "Autorisierung im Popup abschließen…",
+    "connectedAs": "Verbunden: {{account}}",
+    "integrationRequired": "Die Google Sheets-Integration ist auf dieser Instanz nicht konfiguriert. Bitte einen Administrator um Einrichtung."
+  },
+  "createBaseDialog": {
+    "title": "Wie möchtest du beginnen?"
+  },
+  "importBaseDialog": {
+    "title": "Base importieren",
+    "fromFile": "Aus Datei importieren",
+    "fromFileDesc": "Eine .tea-Datenbankdatei hochladen",
+    "fromAirtableDesc": "Airtable-Konto verbinden",
+    "fromGoogleSheetDesc": "Eine Tabelle aus Ihrem Google Drive auswählen"
+  }
+}

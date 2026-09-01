@@ -14,6 +14,8 @@ export const PositionSelector = (props: {
     return {
       [PluginPosition.Dashboard]: t('common:noun.dashboard'),
       [PluginPosition.View]: t('common:noun.view'),
+      [PluginPosition.ContextMenu]: t('common:noun.pluginContextMenu'),
+      [PluginPosition.Panel]: t('common:noun.pluginPanel'),
     };
   }, [t]);
   return (

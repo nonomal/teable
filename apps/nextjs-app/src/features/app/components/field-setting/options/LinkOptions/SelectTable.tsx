@@ -3,12 +3,14 @@ import { ArrowUpRight, Database, Table2 } from '@teable/icons';
 import { getBaseAll } from '@teable/openapi';
 import { ReactQueryKeys } from '@teable/sdk/config';
 import { AnchorContext, TableProvider } from '@teable/sdk/context';
-import { useBaseId, useTableId, useTables } from '@teable/sdk/hooks';
+import { useBase, useBaseId, useTableId, useTables } from '@teable/sdk/hooks';
 import { Button } from '@teable/ui-lib/shadcn';
 import Link from 'next/link';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
 import { Selector } from '@/components/Selector';
+import { RequireCom } from '@/features/app/blocks/setting/components/RequireCom';
+import { useEnv } from '@/features/app/hooks/useEnv';
 import { tableConfig } from '@/features/i18n/table.config';
 
 interface ISelectTableProps {
@@ -25,63 +27,68 @@ export const SelectTable = ({ baseId, tableId, onChange }: ISelectTableProps) =>
   const selectedBaseId = baseId || selfBaseId!;
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-4">
       {enableSelectBase && (
         <>
-          <div className="neutral-content label-text flex h-7 items-center justify-between">
-            {t('table:field.editor.linkBase')}
-            <Button
-              size="xs"
-              variant="link"
-              onClick={() => {
-                setEnableSelectBase(false);
-                onChange?.(undefined, undefined);
+          <div className="flex w-full flex-col gap-2">
+            <div className="neutral-content label-text flex h-5 items-center justify-between">
+              {t('table:field.editor.linkBase')}
+              <Button
+                size="xs"
+                variant="link"
+                onClick={() => {
+                  setEnableSelectBase(false);
+                  onChange?.(undefined, undefined);
+                }}
+                className="h-5 text-xs text-muted-foreground decoration-muted-foreground"
+              >
+                {t('common:actions.cancel')}
+              </Button>
+            </div>
+            <BasePicker
+              baseId={selectedBaseId}
+              onChange={(baseId) => {
+                if (baseId === selfBaseId) {
+                  onChange?.(undefined, undefined);
+                } else {
+                  onChange?.(baseId);
+                }
               }}
-              className="text-xs text-slate-500 underline"
-            >
-              {t('common:actions.cancel')}
-            </Button>
+            />
           </div>
-          <BasePicker
-            baseId={selectedBaseId}
-            onChange={(baseId) => {
-              if (baseId === selfBaseId) {
-                onChange?.(undefined, undefined);
-              } else {
-                onChange?.(baseId);
-              }
-            }}
-          />
         </>
       )}
       <AnchorContext.Provider value={{ baseId: selectedBaseId }}>
-        <div className="neutral-content label-text flex h-7 items-center justify-between">
-          <span className="flex items-center gap-1">
-            {t('table:field.editor.linkTable')}
-            {tableId && (
-              <Link href={`/base/${selectedBaseId}/${tableId}`} target="_blank">
-                <ArrowUpRight className="size-4 shrink-0" />
-              </Link>
+        <div className="flex w-full flex-col gap-2">
+          <div className="neutral-content flex h-5 items-center justify-between text-sm font-medium">
+            <span className="flex items-center gap-1 ">
+              {t('table:field.editor.linkTable')}
+              <RequireCom />
+              {tableId && (
+                <Link href={`/base/${selectedBaseId}/${tableId}`} target="_blank">
+                  <ArrowUpRight className="size-4 shrink-0 text-muted-foreground" />
+                </Link>
+              )}
+            </span>
+            {!enableSelectBase && (
+              <Button
+                size="xs"
+                variant="link"
+                onClick={() => setEnableSelectBase(true)}
+                className="h-5 text-xs text-muted-foreground decoration-muted-foreground hover:underline"
+              >
+                {t('table:field.editor.linkFromAnotherBase')}
+              </Button>
             )}
-          </span>
-          {!enableSelectBase && (
-            <Button
-              size="xs"
-              variant="link"
-              onClick={() => setEnableSelectBase(true)}
-              className="text-xs text-slate-500 underline"
-            >
-              {t('table:field.editor.linkFromExternalBase')}
-            </Button>
-          )}
+          </div>
+          <TableProvider>
+            <TablePicker
+              tableId={tableId}
+              selfTableId={selfTableId}
+              onChange={(tableId) => onChange?.(baseId!, tableId)}
+            />
+          </TableProvider>
         </div>
-        <TableProvider>
-          <TablePicker
-            tableId={tableId}
-            selfTableId={selfTableId}
-            onChange={(tableId) => onChange?.(baseId!, tableId)}
-          />
-        </TableProvider>
       </AnchorContext.Provider>
     </div>
   );
@@ -129,18 +136,26 @@ interface IBasePickerProps {
 
 const BasePicker = ({ baseId, onChange }: IBasePickerProps) => {
   const { t } = useTranslation(tableConfig.i18nNamespaces);
-  let { data: bases } = useQuery({
+  const selfBase = useBase();
+  const { allowCrossSpaceReference } = useEnv();
+  const { data: allBases } = useQuery({
     queryKey: ReactQueryKeys.baseAll(),
     queryFn: () =>
       getBaseAll().then((data) => data.data) as Promise<
-        { id: string; name: string; icon?: string }[]
+        { id: string; name: string; icon?: string; spaceId: string }[]
       >,
   });
 
+  let bases = allowCrossSpaceReference
+    ? allBases
+    : allBases?.filter((base) => base.spaceId === selfBase?.spaceId);
+
   if (baseId && !bases?.find((base) => base.id === baseId)) {
-    bases = bases?.concat({
-      id: baseId!,
-      name: t('table:field.editor.baseNoPermission'),
+    const grandfathered = allBases?.find((base) => base.id === baseId);
+    bases = (bases ?? []).concat({
+      id: baseId,
+      name: grandfathered ? grandfathered.name : t('table:field.editor.baseNoPermission'),
+      spaceId: grandfathered?.spaceId ?? '',
     });
   }
 

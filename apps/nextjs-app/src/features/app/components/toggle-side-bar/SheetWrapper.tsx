@@ -4,20 +4,22 @@ import { cn } from '@teable/ui-lib/shadcn';
 
 interface SheetWrapperProps {
   children: React.ReactNode;
+  triggerTopOffset?: string;
 }
 
 export const SheetWrapper = (props: SheetWrapperProps) => {
-  const { children } = props;
+  const { children, triggerTopOffset = '1.75rem' } = props;
 
   return (
     <Sheet modal={true}>
       <SheetTrigger asChild>
         <Button
-          className={cn('fixed left-0 z-50 p-1 top-7 transition-all rounded-r-full rounded-l-none')}
-          size="xs"
+          className={cn('fixed start-0 z-50 p-1 transition-all rounded-e-full rounded-s-none')}
+          style={{ top: `calc(var(--teable-top-banner-height) + ${triggerTopOffset})` }}
+          size="icon-xs"
           variant={'outline'}
         >
-          <ChevronsRight className="size-5" />
+          <ChevronsRight className="size-5 shrink-0" />
         </Button>
       </SheetTrigger>
       <SheetContent side="left" className="p-0" closeable={false}>

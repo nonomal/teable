@@ -2,16 +2,14 @@ import { z } from 'zod';
 import { IdPrefix } from '../../../utils';
 import { FieldType, CellValueType } from '../constant';
 import { FieldCore } from '../field';
-
-export const ATTACHMENT_SM_THUMBNAIL_HEIGHT = 56;
-export const ATTACHMENT_LG_THUMBNAIL_HEIGHT = 525;
-
-export const attachmentFieldOptionsSchema = z.object({}).strict();
-
-export type IAttachmentFieldOptions = z.infer<typeof attachmentFieldOptionsSchema>;
+import type { IFieldVisitor } from '../field-visitor.interface';
+import {
+  attachmentFieldOptionsSchema,
+  type IAttachmentFieldOptions,
+} from './attachment-option.schema';
 
 export const attachmentItemSchema = z.object({
-  id: z.string().startsWith(IdPrefix.Attachment),
+  id: z.string().startsWith(IdPrefix.Attachment), // partial in Ro
   name: z.string(),
   path: z.string(),
   token: z.string(),
@@ -24,16 +22,28 @@ export const attachmentItemSchema = z.object({
   lgThumbnailUrl: z.string().optional(),
 });
 
+// Simplified format: only name and token (backend will fetch other fields from DB)
+// Optional id: if provided and exists in DB, the attachment will reuse that id
+const attachmentItemRoSchema = attachmentItemSchema.partial().required({ name: true, token: true });
+
 export type IAttachmentItem = z.infer<typeof attachmentItemSchema>;
+
+export type IAttachmentItemRo = z.infer<typeof attachmentItemRoSchema>;
 
 export const attachmentCellValueSchema = z.array(attachmentItemSchema);
 
+export const attachmentCellValueRoSchema = z.array(attachmentItemRoSchema);
+
 export type IAttachmentCellValue = z.infer<typeof attachmentCellValueSchema>;
+
+export type IAttachmentCellValueRo = z.infer<typeof attachmentCellValueRoSchema>;
 
 export class AttachmentFieldCore extends FieldCore {
   type: FieldType.Attachment = FieldType.Attachment;
 
   options!: IAttachmentFieldOptions;
+
+  meta?: undefined;
 
   cellValueType = CellValueType.String;
 
@@ -58,6 +68,13 @@ export class AttachmentFieldCore extends FieldCore {
       : '';
   }
 
+  // attachments are excluded from search: server-side matching could only
+  // run over the stored JSON text (mimetype/path/property names included),
+  // which produces noise hits for keywords like "png" or "pdf"
+  isSearchable() {
+    return false;
+  }
+
   convertStringToCellValue(_value: string, _ctx?: unknown): IAttachmentCellValue | null {
     return null;
   }
@@ -78,7 +95,7 @@ export class AttachmentFieldCore extends FieldCore {
   }
 
   validateCellValue(cellValue: unknown) {
-    return attachmentCellValueSchema.nonempty().nullable().safeParse(cellValue);
+    return attachmentCellValueRoSchema.nonempty().nullable().safeParse(cellValue);
   }
 
   item2String(value: unknown) {
@@ -87,5 +104,9 @@ export class AttachmentFieldCore extends FieldCore {
     }
     const { name, token } = value as IAttachmentItem;
     return AttachmentFieldCore.itemString(name, token);
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitAttachmentField(this);
   }
 }

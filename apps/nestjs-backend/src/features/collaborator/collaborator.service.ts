@@ -1,26 +1,60 @@
+/* eslint-disable @typescript-eslint/naming-convention */
 /* eslint-disable sonarjs/no-duplicate-string */
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
-import { canManageRole, Role, type IBaseRole, type IRole } from '@teable/core';
-import { PrismaService } from '@teable/db-main-prisma';
+import { Injectable } from '@nestjs/common';
 import {
-  CollaboratorType,
-  UploadType,
-  type ListBaseCollaboratorVo,
-  type ListSpaceCollaboratorVo,
+  canManageRole,
+  getRandomString,
+  HttpErrorCode,
+  Role,
+  type IBaseRole,
+  type IRole,
+} from '@teable/core';
+import { PrismaService } from '@teable/db-main-prisma';
+import type {
+  AddBaseCollaboratorRo,
+  AddSpaceCollaboratorRo,
+  CollaboratorItem,
+  IItemBaseCollaboratorUser,
+  IListBaseCollaboratorUserRo,
+  ListSpaceUniqueCollaboratorVo,
+  UniqueCollaboratorItem,
 } from '@teable/openapi';
+import { CollaboratorType, PrincipalType } from '@teable/openapi';
 import { Knex } from 'knex';
-import { map } from 'lodash';
+import { difference, keyBy, map } from 'lodash';
 import { InjectModel } from 'nest-knexjs';
 import { ClsService } from 'nestjs-cls';
+import { ThresholdConfig, IThresholdConfig } from '../../configs/threshold.config';
+import { CustomHttpException } from '../../custom.exception';
+import { InjectDbProvider } from '../../db-provider/db.provider';
+import { IDbProvider } from '../../db-provider/db.provider.interface';
 import { EventEmitterService } from '../../event-emitter/event-emitter.service';
 import {
   CollaboratorCreateEvent,
   CollaboratorDeleteEvent,
+  CollaboratorInvitedEvent,
+  CollaboratorUpdateEvent,
   Events,
 } from '../../event-emitter/events';
 import type { IClsStore } from '../../types/cls';
-import StorageAdapter from '../attachments/plugins/adapter';
-import { getFullStorageUrl } from '../attachments/plugins/utils';
+import { getMaxLevelRole } from '../../utils/get-max-level-role';
+import { getPublicFullStorageUrl } from '../attachments/plugins/utils';
+import { AuditScope } from '../audit/audit-scope';
+import { Audit } from '../audit/audit.decorator';
+
+export type IUniqueCollaboratorRow = {
+  principal_type: PrincipalType;
+  principal_id: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  user_avatar: string | null;
+  user_is_system: boolean | null;
+  last_sign_time: Date | null;
+  space_role: string | null;
+  base_count: number | bigint;
+  created_time: Date;
+};
 
 @Injectable()
 export class CollaboratorService {
@@ -28,20 +62,55 @@ export class CollaboratorService {
     private readonly prismaService: PrismaService,
     private readonly cls: ClsService<IClsStore>,
     private readonly eventEmitterService: EventEmitterService,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex
+    private readonly audit: AuditScope,
+    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex,
+    @InjectDbProvider() private readonly dbProvider: IDbProvider,
+    @ThresholdConfig() private readonly thresholdConfig: IThresholdConfig
   ) {}
 
-  async createSpaceCollaborator(userId: string, spaceId: string, role: IRole, createdBy?: string) {
+  async createSpaceCollaborator({
+    collaborators,
+    spaceId,
+    role,
+    createdBy,
+    skipEvent,
+  }: {
+    collaborators: {
+      principalId: string;
+      principalType: PrincipalType;
+    }[];
+    spaceId: string;
+    role: IRole;
+    createdBy?: string;
+    skipEvent?: boolean;
+  }) {
     const currentUserId = createdBy || this.cls.get('user.id');
     const exist = await this.prismaService.txClient().collaborator.count({
       where: {
-        userId,
+        OR: collaborators.map((collaborator) => ({
+          principalId: collaborator.principalId,
+          principalType: collaborator.principalType,
+        })),
         resourceId: spaceId,
         resourceType: CollaboratorType.Space,
       },
     });
     if (exist) {
-      throw new BadRequestException('has already existed in space');
+      throw new CustomHttpException(
+        'Collaborator has already existed in space',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.alreadyExisted',
+          },
+        }
+      );
+    }
+    if (role === Role.Owner) {
+      const userIds = collaborators
+        .filter((c) => c.principalType === PrincipalType.User)
+        .map((c) => c.principalId);
+      await this.validateOwnedSpaceLimit(spaceId, userIds);
     }
     // if has exist base collaborator, then delete it
     const bases = await this.prismaService.txClient().base.findMany({
@@ -50,93 +119,231 @@ export class CollaboratorService {
         deletedTime: null,
       },
     });
+
     await this.prismaService.txClient().collaborator.deleteMany({
       where: {
-        userId,
+        OR: collaborators.map((collaborator) => ({
+          principalId: collaborator.principalId,
+          principalType: collaborator.principalType,
+        })),
         resourceId: { in: bases.map((base) => base.id) },
         resourceType: CollaboratorType.Base,
       },
     });
-    const collaborator = await this.prismaService.txClient().collaborator.create({
-      data: {
+
+    await this.prismaService.txClient().collaborator.createMany({
+      data: collaborators.map((collaborator) => ({
+        id: getRandomString(16),
         resourceId: spaceId,
         resourceType: CollaboratorType.Space,
         roleName: role,
-        userId,
+        principalId: collaborator.principalId,
+        principalType: collaborator.principalType,
         createdBy: currentUserId!,
-      },
+      })),
     });
-    this.eventEmitterService.emitAsync(
-      Events.COLLABORATOR_CREATE,
-      new CollaboratorCreateEvent(spaceId)
-    );
-    return collaborator;
+    if (!skipEvent) {
+      this.eventEmitterService.emitAsync(
+        Events.COLLABORATOR_CREATE,
+        new CollaboratorCreateEvent(spaceId)
+      );
+    }
   }
 
-  async getListByBase(
+  protected async getBaseCollaboratorBuilder(
+    knex: Knex.QueryBuilder,
     baseId: string,
-    options?: { includeSystem?: boolean }
-  ): Promise<ListBaseCollaboratorVo> {
-    const { includeSystem } = options ?? {};
+    options?: {
+      includeSystem?: boolean;
+      search?: string;
+      type?: PrincipalType;
+      role?: IRole[];
+      // Defaults to true. Set false (e.g. for anonymous share views) to avoid
+      // turning the picker search into an email-based membership oracle.
+      searchByEmail?: boolean;
+    }
+  ) {
     const base = await this.prismaService
       .txClient()
       .base.findUniqueOrThrow({ select: { spaceId: true }, where: { id: baseId } });
 
-    const collaborators = await this.prismaService.txClient().collaborator.findMany({
-      where: {
-        resourceId: { in: [baseId, base.spaceId] },
-        ...(includeSystem ? {} : { user: { isSystem: null } }),
-      },
-      select: {
-        roleName: true,
-        createdTime: true,
-        resourceType: true,
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            avatar: true,
-            isSystem: true,
-          },
-        },
-      },
-      orderBy: { createdTime: 'asc' },
+    const builder = knex
+      .from('collaborator')
+      .leftJoin('users', 'collaborator.principal_id', 'users.id')
+      .whereIn('collaborator.resource_id', [baseId, base.spaceId]);
+    const { includeSystem, search, type, role, searchByEmail = true } = options ?? {};
+    if (!includeSystem) {
+      builder.where((db) => {
+        return db.whereNull('users.is_system').orWhere('users.is_system', false);
+      });
+    }
+    if (search) {
+      const searchFields: [string, string][] = [['users.name', search]];
+      if (searchByEmail) {
+        searchFields.push(['users.email', search]);
+      }
+      this.dbProvider.searchBuilder(builder, searchFields);
+    }
+
+    if (role?.length) {
+      builder.whereIn('collaborator.role_name', role);
+    }
+    if (type) {
+      builder.where('collaborator.principal_type', type);
+    }
+  }
+
+  async getTotalBase(
+    baseId: string,
+    options?: { includeSystem?: boolean; search?: string; type?: PrincipalType; role?: IRole[] }
+  ) {
+    const builder = this.knex.queryBuilder();
+    await this.getBaseCollaboratorBuilder(builder, baseId, options);
+    const res = await this.prismaService
+      .txClient()
+      .$queryRawUnsafe<
+        { count: number }[]
+      >(builder.select(this.knex.raw('COUNT(*) as count')).toQuery());
+    return Number(res[0].count);
+  }
+
+  protected async getListByBaseBuilder(
+    builder: Knex.QueryBuilder,
+    options?: {
+      includeSystem?: boolean;
+      skip?: number;
+      take?: number;
+      search?: string;
+      type?: PrincipalType;
+      orderBy?: 'desc' | 'asc';
+    }
+  ) {
+    const { skip = 0, take = 50 } = options ?? {};
+    builder.offset(skip);
+    builder.limit(take);
+    builder.select({
+      resource_id: 'collaborator.resource_id',
+      role_name: 'collaborator.role_name',
+      created_time: 'collaborator.created_time',
+      resource_type: 'collaborator.resource_type',
+      user_id: 'users.id',
+      user_name: 'users.name',
+      user_email: 'users.email',
+      user_avatar: 'users.avatar',
+      user_is_system: 'users.is_system',
+      last_sign_time: 'users.last_sign_time',
     });
+    builder.orderBy('collaborator.created_time', options?.orderBy ?? 'desc');
+  }
+
+  async getListByBase(
+    baseId: string,
+    options?: {
+      includeSystem?: boolean;
+      skip?: number;
+      take?: number;
+      search?: string;
+      type?: PrincipalType;
+      role?: IRole[];
+    }
+  ): Promise<CollaboratorItem[]> {
+    const builder = this.knex.queryBuilder();
+    builder.whereNotNull('users.id');
+    await this.getBaseCollaboratorBuilder(builder, baseId, options);
+    await this.getListByBaseBuilder(builder, options);
+    const collaborators = await this.prismaService.txClient().$queryRawUnsafe<
+      {
+        resource_id: string;
+        role_name: string;
+        created_time: Date;
+        resource_type: string;
+        user_id: string;
+        user_name: string;
+        user_email: string;
+        user_avatar: string;
+        user_is_system: boolean | null;
+        last_sign_time: Date | null;
+      }[]
+    >(builder.toQuery());
 
     return collaborators.map((collaborator) => ({
-      userId: collaborator.user.id,
-      userName: collaborator.user.name,
-      email: collaborator.user.email,
-      avatar: collaborator.user.avatar
-        ? getFullStorageUrl(StorageAdapter.getBucket(UploadType.Avatar), collaborator.user.avatar)
-        : null,
-      role: collaborator.roleName as IRole,
-      createdTime: collaborator.createdTime.toISOString(),
-      resourceType: collaborator.resourceType as CollaboratorType,
-      isSystem: collaborator.user.isSystem || undefined,
+      type: PrincipalType.User,
+      userId: collaborator.user_id,
+      userName: collaborator.user_name,
+      email: collaborator.user_email,
+      avatar: collaborator.user_avatar ? getPublicFullStorageUrl(collaborator.user_avatar) : null,
+      role: collaborator.role_name as IRole,
+      createdTime: collaborator.created_time.toISOString(),
+      lastSignTime: collaborator.last_sign_time?.toISOString() ?? null,
+      resourceType: collaborator.resource_type as CollaboratorType,
+      isSystem: collaborator.user_is_system || undefined,
     }));
   }
 
-  async getBaseCollabsWithPrimary(tableId: string) {
+  async getUserCollaboratorsByTableId(
+    tableId: string,
+    query: {
+      containsIn: {
+        keys: ('id' | 'name' | 'email' | 'phone')[];
+        values: string[];
+      };
+    }
+  ) {
     const { baseId } = await this.prismaService.txClient().tableMeta.findUniqueOrThrow({
       select: { baseId: true },
       where: { id: tableId },
     });
 
-    const baseCollabs = await this.getListByBase(baseId);
-    return baseCollabs.map(({ userId, userName, email }) => ({
-      id: userId,
-      name: userName,
-      email,
-    }));
+    const builder = this.knex.queryBuilder();
+    await this.getBaseCollaboratorBuilder(builder, baseId, {
+      includeSystem: true,
+    });
+    if (query.containsIn) {
+      builder.where((db) => {
+        const keys = query.containsIn.keys;
+        const values = query.containsIn.values;
+        keys.forEach((key) => {
+          db.orWhereIn('users.' + key, values);
+        });
+        return db;
+      });
+    }
+    builder.whereNotNull('users.id');
+    builder.select({
+      id: 'users.id',
+      name: 'users.name',
+      email: 'users.email',
+      avatar: 'users.avatar',
+      isSystem: 'users.is_system',
+    });
+
+    return this.prismaService.txClient().$queryRawUnsafe<
+      {
+        id: string;
+        name: string;
+        email: string;
+        avatar: string | null;
+        isSystem: boolean | null;
+      }[]
+    >(builder.toQuery());
   }
 
-  async getListBySpace(
+  protected async getSpaceCollaboratorBuilder(
+    knex: Knex.QueryBuilder,
     spaceId: string,
-    options?: { includeSystem?: boolean; includeBase?: boolean }
-  ): Promise<ListSpaceCollaboratorVo> {
-    const { includeSystem, includeBase } = options ?? {};
+    options?: {
+      includeSystem?: boolean;
+      search?: string;
+      includeBase?: boolean;
+      type?: PrincipalType;
+      principalId?: string;
+    }
+  ): Promise<{
+    builder: Knex.QueryBuilder;
+    baseMap: Record<string, { name: string; id: string }>;
+  }> {
+    const { includeSystem, search, type, includeBase, principalId } = options ?? {};
+
     let baseIds: string[] = [];
     let baseMap: Record<string, { name: string; id: string }> = {};
     if (includeBase) {
@@ -152,56 +359,296 @@ export class CollaboratorService {
         {} as Record<string, { name: string; id: string }>
       );
     }
-    const collaborators = await this.prismaService.txClient().collaborator.findMany({
-      where: {
-        resourceId: baseIds.length ? { in: [...baseIds, spaceId] } : spaceId,
-        ...(includeSystem ? {} : { user: { isSystem: null } }),
-      },
-      select: {
-        resourceId: true,
-        roleName: true,
-        createdTime: true,
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            avatar: true,
-          },
-        },
-      },
-      orderBy: { createdTime: 'asc' },
+
+    const builder = knex
+      .from('collaborator')
+      .leftJoin('users', 'collaborator.principal_id', 'users.id');
+
+    if (baseIds?.length) {
+      builder.whereIn('collaborator.resource_id', [...baseIds, spaceId]);
+    } else {
+      builder.where('collaborator.resource_id', spaceId);
+    }
+    if (!includeSystem) {
+      builder.where((db) => {
+        return db.whereNull('users.is_system').orWhere('users.is_system', false);
+      });
+    }
+    if (search) {
+      this.dbProvider.searchBuilder(builder, [
+        ['users.name', search],
+        ['users.email', search],
+      ]);
+    }
+    if (type) {
+      builder.where('collaborator.principal_type', type);
+    }
+    if (principalId) {
+      builder.where('collaborator.principal_id', principalId);
+    }
+    return { builder, baseMap };
+  }
+
+  async getTotalSpace(
+    spaceId: string,
+    options?: {
+      includeSystem?: boolean;
+      includeBase?: boolean;
+      search?: string;
+      type?: PrincipalType;
+      principalId?: string;
+    }
+  ) {
+    const builder = this.knex.queryBuilder();
+    await this.getSpaceCollaboratorBuilder(builder, spaceId, options);
+    const res = await this.prismaService
+      .txClient()
+      .$queryRawUnsafe<
+        { count: number }[]
+      >(builder.select(this.knex.raw('COUNT(*) as count')).toQuery());
+    return Number(res[0].count);
+  }
+
+  async getSpaceCollaboratorStats(
+    spaceId: string,
+    options?: {
+      includeSystem?: boolean;
+      includeBase?: boolean;
+      search?: string;
+      type?: PrincipalType;
+      principalId?: string;
+    }
+  ) {
+    const [total, uniqTotal] = await Promise.all([
+      this.getTotalSpace(spaceId, options),
+      this.getUniqSpaceCollaboratorCount(spaceId, options),
+    ]);
+    return {
+      total,
+      uniqTotal,
+    };
+  }
+
+  // Unique principals across space and base collaborators
+  protected async getUniqSpaceCollaboratorCount(
+    spaceId: string,
+    options?: {
+      includeSystem?: boolean;
+      search?: string;
+      type?: PrincipalType;
+    }
+  ) {
+    const uniqBuilder = this.knex.queryBuilder();
+    await this.getSpaceCollaboratorBuilder(uniqBuilder, spaceId, { ...options, includeBase: true });
+    const uniqRes = await this.prismaService
+      .txClient()
+      .$queryRawUnsafe<
+        { count: number }[]
+      >(uniqBuilder.select(this.knex.raw('COUNT(DISTINCT users.id) as count')).toQuery());
+    return Number(uniqRes[0].count);
+  }
+
+  // Select per-principal columns on the row-level builder and return their
+  // aliases so the grouping query can group by them. EE adds department and
+  // billable columns here.
+  protected decorateUniqueListInnerBuilder(builder: Knex.QueryBuilder, _spaceId: string): string[] {
+    builder.select({
+      user_id: 'users.id',
+      user_name: 'users.name',
+      user_email: 'users.email',
+      user_avatar: 'users.avatar',
+      user_is_system: 'users.is_system',
+      last_sign_time: 'users.last_sign_time',
     });
-    return collaborators.map((collaborator) => ({
-      userId: collaborator.user.id,
-      userName: collaborator.user.name,
-      email: collaborator.user.email,
-      avatar: collaborator.user.avatar
-        ? getFullStorageUrl(StorageAdapter.getBucket(UploadType.Avatar), collaborator.user.avatar)
-        : null,
-      role: collaborator.roleName as IRole,
-      createdTime: collaborator.createdTime.toISOString(),
-      base: baseMap[collaborator.resourceId],
-    }));
+    return [
+      'user_id',
+      'user_name',
+      'user_email',
+      'user_avatar',
+      'user_is_system',
+      'last_sign_time',
+    ];
+  }
+
+  // Keep the list consistent with getUniqSpaceCollaboratorCount, which only
+  // counts resolvable users: rows whose principal no longer resolves must not
+  // form ghost groups. EE relaxes this to also admit departments.
+  protected excludeDanglingUniquePrincipals(builder: Knex.QueryBuilder) {
+    builder.whereNotNull('users.id');
+  }
+
+  protected mapUniqueCollaborator(row: IUniqueCollaboratorRow): UniqueCollaboratorItem {
+    return {
+      type: PrincipalType.User,
+      userId: row.user_id,
+      userName: row.user_name,
+      email: row.user_email,
+      avatar: row.user_avatar ? getPublicFullStorageUrl(row.user_avatar) : null,
+      isSystem: row.user_is_system || undefined,
+      lastSignTime: row.last_sign_time?.toISOString() ?? null,
+      spaceRole: (row.space_role as IRole) ?? null,
+      baseCount: Number(row.base_count),
+      createdTime: row.created_time.toISOString(),
+    };
+  }
+
+  async getUniqueListBySpace(
+    spaceId: string,
+    options?: {
+      includeSystem?: boolean;
+      skip?: number;
+      take?: number;
+      search?: string;
+      type?: PrincipalType;
+      orderBy?: 'desc' | 'asc';
+    }
+  ): Promise<ListSpaceUniqueCollaboratorVo> {
+    const { skip = 0, take = 50, orderBy = 'desc' } = options ?? {};
+    const inner = this.knex.queryBuilder();
+    await this.getSpaceCollaboratorBuilder(inner, spaceId, { ...options, includeBase: true });
+    this.excludeDanglingUniquePrincipals(inner);
+    inner.select({
+      principal_type: 'collaborator.principal_type',
+      principal_id: 'collaborator.principal_id',
+      resource_type: 'collaborator.resource_type',
+      role_name: 'collaborator.role_name',
+      created_time: 'collaborator.created_time',
+    });
+    const principalColumns = this.decorateUniqueListInnerBuilder(inner, spaceId);
+
+    const groupColumns = ['principal_type', 'principal_id', ...principalColumns];
+    const builder = this.knex
+      .from(inner.as('space_collaborator'))
+      .groupBy(groupColumns)
+      .select(groupColumns)
+      .select(
+        this.knex.raw('MAX(CASE WHEN resource_type = ? THEN role_name END) as space_role', [
+          CollaboratorType.Space,
+        ]),
+        this.knex.raw('SUM(CASE WHEN resource_type = ? THEN 1 ELSE 0 END) as base_count', [
+          CollaboratorType.Base,
+        ]),
+        this.knex.raw('MIN(created_time) as created_time')
+      )
+      // principal_id keeps pagination stable across equal created_time values
+      .orderBy([
+        { column: 'created_time', order: orderBy },
+        { column: 'principal_id', order: 'asc' },
+      ])
+      .offset(skip)
+      .limit(take);
+
+    const [rows, total] = await Promise.all([
+      this.prismaService.txClient().$queryRawUnsafe<IUniqueCollaboratorRow[]>(builder.toQuery()),
+      this.getUniqSpaceCollaboratorCount(spaceId, options),
+    ]);
+    const collaborators = rows.map((row) => this.mapUniqueCollaborator(row));
+    return { collaborators, total };
+  }
+
+  // eslint-disable-next-line sonarjs/no-identical-functions
+  protected async getListBySpaceBuilder(
+    builder: Knex.QueryBuilder,
+    options?: {
+      includeSystem?: boolean;
+      includeBase?: boolean;
+      skip?: number;
+      take?: number;
+      search?: string;
+      type?: PrincipalType;
+      orderBy?: 'desc' | 'asc';
+    }
+  ) {
+    const { skip = 0, take = 50 } = options ?? {};
+    builder.offset(skip);
+    builder.limit(take);
+    builder.select({
+      resource_id: 'collaborator.resource_id',
+      role_name: 'collaborator.role_name',
+      created_time: 'collaborator.created_time',
+      resource_type: 'collaborator.resource_type',
+      user_id: 'users.id',
+      user_name: 'users.name',
+      user_email: 'users.email',
+      user_avatar: 'users.avatar',
+      user_is_system: 'users.is_system',
+      last_sign_time: 'users.last_sign_time',
+    });
+    builder.orderBy('collaborator.created_time', options?.orderBy ?? 'desc');
+  }
+
+  async getListBySpace(
+    spaceId: string,
+    options?: {
+      includeSystem?: boolean;
+      includeBase?: boolean;
+      skip?: number;
+      take?: number;
+      search?: string;
+      type?: PrincipalType;
+      orderBy?: 'desc' | 'asc';
+      principalId?: string;
+    }
+  ): Promise<CollaboratorItem[]> {
+    const builder = this.knex.queryBuilder();
+    builder.whereNotNull('users.id');
+    const { baseMap } = await this.getSpaceCollaboratorBuilder(builder, spaceId, options);
+    await this.getListBySpaceBuilder(builder, options);
+    const collaborators = await this.prismaService.txClient().$queryRawUnsafe<
+      {
+        resource_id: string;
+        role_name: string;
+        created_time: Date;
+        resource_type: string;
+        user_id: string;
+        user_name: string;
+        user_email: string;
+        user_avatar: string;
+        user_is_system: boolean | null;
+        last_sign_time: Date | null;
+      }[]
+    >(builder.toQuery());
+
+    // Get billable users if not community edition and includeBase is true
+    return collaborators.map((collaborator) => {
+      return {
+        type: PrincipalType.User,
+        resourceType: collaborator.resource_type as CollaboratorType,
+        userId: collaborator.user_id,
+        userName: collaborator.user_name,
+        email: collaborator.user_email,
+        avatar: collaborator.user_avatar ? getPublicFullStorageUrl(collaborator.user_avatar) : null,
+        role: collaborator.role_name as IRole,
+        createdTime: collaborator.created_time.toISOString(),
+        lastSignTime: collaborator.last_sign_time?.toISOString() ?? null,
+        base: baseMap[collaborator.resource_id],
+      };
+    });
   }
 
   private async getOperatorCollaborators({
-    targetUserId,
-    currentUserId,
+    targetPrincipalId,
+    currentPrincipalId,
     resourceId,
     resourceType,
   }: {
     resourceId: string;
     resourceType: CollaboratorType;
-    targetUserId: string;
-    currentUserId: string;
+    targetPrincipalId: string;
+    currentPrincipalId: string;
   }) {
-    const currentUserWhere: { userId: string; resourceId: string | Record<string, string[]> } = {
-      userId: currentUserId,
+    const currentUserWhere: {
+      principalId: string;
+      resourceId: string | Record<string, string[]>;
+    } = {
+      principalId: currentPrincipalId,
       resourceId,
     };
-    const targetUserWhere: { userId: string; resourceId: string | Record<string, string[]> } = {
-      userId: targetUserId,
+    const targetUserWhere: {
+      principalId: string;
+      resourceId: string | Record<string, string[]>;
+    } = {
+      principalId: targetPrincipalId,
       resourceId,
     };
 
@@ -222,124 +669,289 @@ export class CollaboratorService {
       },
     });
 
-    const currentColl = colls.find((coll) => coll.userId === currentUserId);
-    const targetColl = colls.find((coll) => coll.userId === targetUserId);
+    const currentColl = colls.find((coll) => coll.principalId === currentPrincipalId);
+    const targetColl = colls.find((coll) => coll.principalId === targetPrincipalId);
     if (!currentColl || !targetColl) {
-      throw new BadRequestException('User not found in collaborator');
+      throw new CustomHttpException(
+        'User not found in collaborator',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.userNotFoundInCollaborator',
+          },
+        }
+      );
     }
     return { currentColl, targetColl };
   }
 
-  async isUniqueOwnerUser(spaceId: string, userId: string) {
-    const collaborators = await this.prismaService.txClient().collaborator.findMany({
-      where: {
-        resourceType: CollaboratorType.Space,
-        resourceId: spaceId,
-        roleName: Role.Owner,
-        user: {
-          isSystem: null,
-          deletedTime: null,
-          deactivatedTime: null,
-        },
-      },
+  // Remove every base-level collaborator row of one principal within a space,
+  // reusing deleteCollaborator per row so role checks and events apply.
+  async deleteBaseCollaboratorsBySpace({
+    spaceId,
+    principalId,
+    principalType,
+  }: {
+    spaceId: string;
+    principalId: string;
+    principalType: PrincipalType;
+  }) {
+    const bases = await this.prismaService.txClient().base.findMany({
+      where: { spaceId, deletedTime: null },
+      select: { id: true },
     });
-    return collaborators.length === 1 && collaborators[0].userId === userId;
+    const rows = await this.prismaService.txClient().collaborator.findMany({
+      where: {
+        principalId,
+        principalType,
+        resourceType: CollaboratorType.Base,
+        resourceId: { in: bases.map((base) => base.id) },
+      },
+      select: { resourceId: true },
+    });
+    await this.prismaService.$tx(async () => {
+      for (const row of rows) {
+        await this.deleteCollaborator({
+          resourceId: row.resourceId,
+          resourceType: CollaboratorType.Base,
+          principalId,
+          principalType,
+        });
+      }
+    });
+  }
+
+  async isUniqueOwnerUser(spaceId: string, userId: string) {
+    const builder = this.knex('collaborator')
+      .leftJoin('users', 'collaborator.principal_id', 'users.id')
+      .where('collaborator.resource_id', spaceId)
+      .where('collaborator.resource_type', CollaboratorType.Space)
+      .where('collaborator.role_name', Role.Owner)
+      .where('users.is_system', null)
+      .where('users.deleted_time', null)
+      .where('users.deactivated_time', null)
+      .select('collaborator.principal_id');
+    const collaborators = await this.prismaService.txClient().$queryRawUnsafe<
+      {
+        principal_id: string;
+      }[]
+    >(builder.toQuery());
+    return collaborators.length === 1 && collaborators[0].principal_id === userId;
+  }
+
+  protected async getUserOwnedSpaceIds(userIds: string[]): Promise<Map<string, string[]>> {
+    if (userIds.length === 0) return new Map();
+    const builder = this.knex('collaborator')
+      .join('space', 'collaborator.resource_id', 'space.id')
+      .whereIn('collaborator.principal_id', userIds)
+      .where('collaborator.principal_type', PrincipalType.User)
+      .where('collaborator.resource_type', CollaboratorType.Space)
+      .where('collaborator.role_name', Role.Owner)
+      .whereNull('space.deleted_time')
+      .select('collaborator.principal_id as user_id', 'collaborator.resource_id as space_id');
+    const rows = await this.prismaService
+      .txClient()
+      .$queryRawUnsafe<{ user_id: string; space_id: string }[]>(builder.toQuery());
+    const map = new Map<string, string[]>();
+    for (const row of rows) {
+      const ids = map.get(row.user_id) ?? [];
+      ids.push(row.space_id);
+      map.set(row.user_id, ids);
+    }
+    return map;
+  }
+
+  async validateOwnedSpaceLimit(_spaceId: string, _userIds: string[]): Promise<void> {
+    // no-op in community; EE overrides with free-space limit
   }
 
   async deleteCollaborator({
     resourceId,
     resourceType,
-    userId,
+    principalId,
+    principalType,
   }: {
-    userId: string;
+    principalId: string;
+    principalType: PrincipalType;
     resourceId: string;
     resourceType: CollaboratorType;
   }) {
     const currentUserId = this.cls.get('user.id');
     const { currentColl, targetColl } = await this.getOperatorCollaborators({
-      currentUserId,
-      targetUserId: userId,
+      currentPrincipalId: currentUserId,
+      targetPrincipalId: principalId,
       resourceId,
       resourceType,
     });
 
     // validate user can operator target user
     if (
-      currentUserId !== userId &&
+      currentUserId !== principalId &&
       currentColl.roleName !== Role.Owner &&
       !canManageRole(currentColl.roleName as IRole, targetColl.roleName)
     ) {
-      throw new ForbiddenException(`You do not have permission to delete this user: ${userId}`);
+      throw new CustomHttpException(
+        'You do not have permission to delete this collaborator',
+        HttpErrorCode.RESTRICTED_RESOURCE,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.noPermissionToDelete',
+          },
+        }
+      );
     }
     const result = await this.prismaService.txClient().collaborator.delete({
       where: {
         // eslint-disable-next-line @typescript-eslint/naming-convention
-        resourceType_resourceId_userId: {
+        resourceType_resourceId_principalId_principalType: {
           resourceId: resourceId,
           resourceType: resourceType,
-          userId,
+          principalId,
+          principalType,
         },
       },
     });
-    if (resourceType === CollaboratorType.Space) {
-      this.eventEmitterService.emitAsync(
-        Events.COLLABORATOR_DELETE,
-        new CollaboratorDeleteEvent(resourceId)
-      );
+    let spaceId: string = resourceId;
+    if (resourceType === CollaboratorType.Base) {
+      const space = await this.prismaService
+        .txClient()
+        .base.findUniqueOrThrow({ where: { id: resourceId }, select: { spaceId: true } });
+      spaceId = space.spaceId;
+      // Base-scope audit (space-scope audit not required by current spec).
+      await this.audit.emitAtomic({
+        action: Events.BASE_COLLABORATOR_DELETE,
+        resourceId,
+        params: {
+          baseId: resourceId,
+          spaceId,
+          principalId,
+          principalType,
+          oldRole: targetColl.roleName,
+        },
+      });
     }
+    this.eventEmitterService.emitAsync(
+      Events.COLLABORATOR_DELETE,
+      new CollaboratorDeleteEvent(spaceId)
+    );
     return result;
   }
 
   async updateCollaborator({
     role,
-    userId,
+    principalId,
+    principalType,
     resourceId,
     resourceType,
   }: {
     role: IRole;
-    userId: string;
+    principalId: string;
+    principalType: PrincipalType;
     resourceId: string;
     resourceType: CollaboratorType;
   }) {
     const currentUserId = this.cls.get('user.id');
     const { currentColl, targetColl } = await this.getOperatorCollaborators({
-      currentUserId,
-      targetUserId: userId,
+      currentPrincipalId: currentUserId,
+      targetPrincipalId: principalId,
       resourceId,
       resourceType,
     });
 
     // validate user can operator target user
     if (
-      currentUserId !== userId &&
+      currentUserId !== principalId &&
       currentColl.roleName !== targetColl.roleName &&
       !canManageRole(currentColl.roleName as IRole, targetColl.roleName)
     ) {
-      throw new ForbiddenException(`You do not have permission to operator this user: ${userId}`);
+      throw new CustomHttpException(
+        `You do not have permission to operator this collaborator: ${principalId}`,
+        HttpErrorCode.RESTRICTED_RESOURCE,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.noPermissionToUpdate',
+          },
+        }
+      );
     }
 
     // validate user can operator target role
     if (role !== currentColl.roleName && !canManageRole(currentColl.roleName as IRole, role)) {
-      throw new ForbiddenException(`You do not have permission to operator this role: ${role}`);
+      throw new CustomHttpException(
+        `You do not have permission to operator this role: ${role}`,
+        HttpErrorCode.RESTRICTED_RESOURCE,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.noPermissionToOperateRole',
+          },
+        }
+      );
     }
 
-    return this.prismaService.txClient().collaborator.updateMany({
+    if (
+      role === Role.Owner &&
+      resourceType === CollaboratorType.Space &&
+      targetColl.roleName !== Role.Owner &&
+      principalType === PrincipalType.User
+    ) {
+      await this.validateOwnedSpaceLimit(resourceId, [principalId]);
+    }
+
+    const res = await this.prismaService.txClient().collaborator.updateMany({
       where: {
         resourceId: resourceId,
         resourceType: resourceType,
-        userId,
+        principalId: principalId,
+        principalType: principalType,
       },
       data: {
         roleName: role,
         lastModifiedBy: currentUserId,
       },
     });
+
+    let spaceId: string = '';
+    if (resourceType === CollaboratorType.Base) {
+      const space = await this.prismaService
+        .txClient()
+        .base.findUniqueOrThrow({ where: { id: resourceId }, select: { spaceId: true } });
+      spaceId = space.spaceId;
+      // Base-scope audit. Only emit when role actually changes — same-role PATCHes
+      // (e.g. no-op idempotency calls) shouldn't bloat the audit log.
+      if (targetColl.roleName !== role) {
+        await this.audit.emitAtomic({
+          action: Events.BASE_COLLABORATOR_UPDATE,
+          resourceId,
+          params: {
+            baseId: resourceId,
+            spaceId,
+            principalId,
+            principalType,
+            oldRole: targetColl.roleName,
+            newRole: role,
+          },
+        });
+      }
+    } else if (resourceType === CollaboratorType.Space) {
+      spaceId = resourceId;
+    }
+
+    if (spaceId) {
+      this.eventEmitterService.emitAsync(
+        Events.COLLABORATOR_UPDATE,
+        new CollaboratorUpdateEvent(spaceId)
+      );
+    }
+
+    return res;
   }
 
-  async getCollaboratorsBaseAndSpaceArray(userId: string, searchRoles?: IRole[]) {
+  async getCurrentUserCollaboratorsBaseAndSpaceArray(searchRoles?: IRole[]) {
+    const userId = this.cls.get('user.id');
+    const departmentIds = this.cls.get('organization.departments')?.map((d) => d.id);
     const collaborators = await this.prismaService.txClient().collaborator.findMany({
       where: {
-        userId,
+        principalId: { in: [userId, ...(departmentIds || [])] },
         ...(searchRoles && searchRoles.length > 0 ? { roleName: { in: searchRoles } } : {}),
       },
       select: {
@@ -351,14 +963,14 @@ export class CollaboratorService {
     const roleMap: Record<string, IRole> = {};
     const baseIds = new Set<string>();
     const spaceIds = new Set<string>();
-    collaborators.forEach(({ resourceId, resourceType, roleName }) => {
-      if (resourceType === CollaboratorType.Base) {
-        baseIds.add(resourceId);
+    collaborators.forEach(({ resourceId, roleName, resourceType }) => {
+      if (!roleMap[resourceId] || canManageRole(roleName as IRole, roleMap[resourceId])) {
         roleMap[resourceId] = roleName as IRole;
       }
-      if (resourceType === CollaboratorType.Space) {
+      if (resourceType === CollaboratorType.Base) {
+        baseIds.add(resourceId);
+      } else {
         spaceIds.add(resourceId);
-        roleMap[resourceId] = roleName as IRole;
       }
     });
     return {
@@ -368,43 +980,88 @@ export class CollaboratorService {
     };
   }
 
-  async createBaseCollaborator(
-    userId: string,
-    baseId: string,
-    role: IBaseRole,
-    createdBy?: string
-  ) {
+  @Audit({
+    action: Events.BASE_COLLABORATOR_CREATE,
+    resourceId: (input: { baseId: string }) => input.baseId,
+    params: (input: {
+      baseId: string;
+      role: IBaseRole;
+      collaborators: { principalId: string; principalType: PrincipalType }[];
+    }) => ({
+      baseId: input.baseId,
+      role: input.role,
+      collaborators: input.collaborators,
+    }),
+    emit: true,
+  })
+  async createBaseCollaborator({
+    collaborators,
+    baseId,
+    role,
+    createdBy,
+    skipEvent,
+  }: {
+    collaborators: {
+      principalId: string;
+      principalType: PrincipalType;
+    }[];
+    baseId: string;
+    role: IBaseRole;
+    createdBy?: string;
+    skipEvent?: boolean;
+  }) {
     const currentUserId = createdBy || this.cls.get('user.id');
     const base = await this.prismaService.txClient().base.findUniqueOrThrow({
       where: { id: baseId },
     });
     const exist = await this.prismaService.txClient().collaborator.count({
       where: {
-        userId,
+        OR: collaborators.map((collaborator) => ({
+          principalId: collaborator.principalId,
+          principalType: collaborator.principalType,
+        })),
         resourceId: { in: [baseId, base.spaceId] },
       },
     });
     // if has exist space collaborator
     if (exist) {
-      throw new BadRequestException('has already existed in base');
+      throw new CustomHttpException(
+        'Collaborator has already existed in base',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.alreadyExistedInBase',
+          },
+        }
+      );
     }
 
-    return this.prismaService.txClient().collaborator.create({
-      data: {
+    const res = await this.prismaService.txClient().collaborator.createMany({
+      data: collaborators.map((collaborator) => ({
+        id: getRandomString(16),
         resourceId: baseId,
         resourceType: CollaboratorType.Base,
         roleName: role,
-        userId,
+        principalId: collaborator.principalId,
+        principalType: collaborator.principalType,
         createdBy: currentUserId!,
-      },
+      })),
     });
+    if (!skipEvent) {
+      this.eventEmitterService.emitAsync(
+        Events.COLLABORATOR_CREATE,
+        new CollaboratorCreateEvent(base.spaceId)
+      );
+    }
+    return res;
   }
 
   async getSharedBase() {
     const userId = this.cls.get('user.id');
+    const departmentIds = this.cls.get('organization.departments')?.map((d) => d.id);
     const coll = await this.prismaService.txClient().collaborator.findMany({
       where: {
-        userId,
+        principalId: { in: [userId, ...(departmentIds || [])] },
         resourceType: CollaboratorType.Base,
       },
       select: {
@@ -419,7 +1076,9 @@ export class CollaboratorService {
 
     const roleMap: Record<string, IRole> = {};
     const baseIds = coll.map((c) => {
-      roleMap[c.resourceId] = c.roleName as IRole;
+      if (!roleMap[c.resourceId] || canManageRole(c.roleName as IRole, roleMap[c.resourceId])) {
+        roleMap[c.resourceId] = c.roleName as IRole;
+      }
       return c.resourceId;
     });
     const bases = await this.prismaService.txClient().base.findMany({
@@ -427,14 +1086,262 @@ export class CollaboratorService {
         id: { in: baseIds },
         deletedTime: null,
       },
+      include: {
+        space: {
+          select: {
+            name: true,
+          },
+        },
+      },
     });
+
+    const createdUserList = await this.prismaService.txClient().user.findMany({
+      where: { id: { in: bases.map((base) => base.createdBy) } },
+      select: { id: true, name: true, avatar: true },
+    });
+    const createdUserMap = keyBy(createdUserList, 'id');
     return bases.map((base) => ({
       id: base.id,
       name: base.name,
       role: roleMap[base.id],
       icon: base.icon,
       spaceId: base.spaceId,
+      spaceName: base.space?.name,
       collaboratorType: CollaboratorType.Base,
+      lastModifiedTime: base.lastModifiedTime?.toISOString(),
+      createdTime: base.createdTime?.toISOString(),
+      createdBy: base.createdBy,
+      createdUser: {
+        ...(createdUserMap[base.createdBy] ?? {}),
+        avatar:
+          createdUserMap[base.createdBy]?.avatar &&
+          getPublicFullStorageUrl(createdUserMap[base.createdBy]?.avatar ?? ''),
+      },
     }));
+  }
+
+  protected async validateCollaboratorUser(userIds: string[]) {
+    const users = await this.prismaService.txClient().user.findMany({
+      where: {
+        id: { in: userIds },
+        deletedTime: null,
+      },
+      select: {
+        id: true,
+      },
+    });
+    const diffIds = difference(
+      userIds,
+      users.map((u) => u.id)
+    );
+    if (diffIds.length > 0) {
+      throw new CustomHttpException(
+        `User not found: ${diffIds.join(', ')}`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.userNotFound',
+            context: { userIds: diffIds.join(', ') },
+          },
+        }
+      );
+    }
+  }
+
+  async addSpaceCollaborators(spaceId: string, collaborator: AddSpaceCollaboratorRo) {
+    const departmentIds = this.cls.get('organization.departments')?.map((d) => d.id);
+    await this.validateUserAddRole({
+      departmentIds,
+      userId: this.cls.get('user.id'),
+      addRole: collaborator.role,
+      resourceId: spaceId,
+      resourceType: CollaboratorType.Space,
+    });
+    await this.validateCollaboratorUser(
+      collaborator.collaborators
+        .filter((c) => c.principalType === PrincipalType.User)
+        .map((c) => c.principalId)
+    );
+    const res = await this.createSpaceCollaborator({
+      collaborators: collaborator.collaborators,
+      spaceId,
+      role: collaborator.role,
+      createdBy: this.cls.get('user.id'),
+    });
+    this.eventEmitterService.emitAsync(
+      Events.COLLABORATOR_INVITED,
+      new CollaboratorInvitedEvent(
+        spaceId,
+        CollaboratorType.Space,
+        this.cls.get('user.id'),
+        collaborator.collaborators
+      )
+    );
+    return res;
+  }
+
+  async addBaseCollaborators(baseId: string, collaborator: AddBaseCollaboratorRo) {
+    const departmentIds = this.cls.get('organization.departments')?.map((d) => d.id);
+    await this.validateUserAddRole({
+      departmentIds,
+      userId: this.cls.get('user.id'),
+      addRole: collaborator.role,
+      resourceId: baseId,
+      resourceType: CollaboratorType.Base,
+    });
+    await this.validateCollaboratorUser(
+      collaborator.collaborators
+        .filter((c) => c.principalType === PrincipalType.User)
+        .map((c) => c.principalId)
+    );
+    const res = await this.createBaseCollaborator({
+      collaborators: collaborator.collaborators,
+      baseId,
+      role: collaborator.role,
+      createdBy: this.cls.get('user.id'),
+    });
+    this.eventEmitterService.emitAsync(
+      Events.COLLABORATOR_INVITED,
+      new CollaboratorInvitedEvent(
+        baseId,
+        CollaboratorType.Base,
+        this.cls.get('user.id'),
+        collaborator.collaborators
+      )
+    );
+    return res;
+  }
+
+  async validateUserAddRole({
+    departmentIds,
+    userId,
+    addRole,
+    resourceId,
+    resourceType,
+  }: {
+    departmentIds?: string[];
+    userId: string;
+    addRole: IRole;
+    resourceId: string;
+    resourceType: CollaboratorType;
+  }) {
+    let spaceId = resourceType === CollaboratorType.Space ? resourceId : '';
+    if (resourceType === CollaboratorType.Base) {
+      const base = await this.prismaService
+        .txClient()
+        .base.findFirstOrThrow({
+          where: {
+            id: resourceId,
+            deletedTime: null,
+          },
+        })
+        .catch(() => {
+          throw new CustomHttpException('Base not found', HttpErrorCode.VALIDATION_ERROR, {
+            localization: {
+              i18nKey: 'httpErrors.collaborator.baseNotFound',
+            },
+          });
+        });
+      spaceId = base.spaceId;
+    }
+    const collaborators = await this.prismaService.txClient().collaborator.findMany({
+      where: {
+        principalId: departmentIds ? { in: [...departmentIds, userId] } : userId,
+        resourceId: {
+          in: [spaceId, resourceId],
+        },
+      },
+    });
+    if (collaborators.length === 0) {
+      throw new CustomHttpException(
+        'User not found in collaborator',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.userNotFoundInCollaborator',
+          },
+        }
+      );
+    }
+    const userRole = getMaxLevelRole(collaborators);
+
+    if (userRole === addRole) {
+      return;
+    }
+    if (!canManageRole(userRole, addRole)) {
+      throw new CustomHttpException(
+        `You do not have permission to add this role collaborator: ${addRole}`,
+        HttpErrorCode.RESTRICTED_RESOURCE,
+        {
+          localization: {
+            i18nKey: 'httpErrors.collaborator.noPermissionToAddRole',
+          },
+        }
+      );
+    }
+  }
+
+  async getUserCollaboratorsTotal(baseId: string, options?: IListBaseCollaboratorUserRo) {
+    return this.getTotalBase(baseId, options);
+  }
+
+  async getUserCollaborators(
+    baseId: string,
+    options?: IListBaseCollaboratorUserRo & { searchByEmail?: boolean }
+  ) {
+    const { skip = 0, take = 50 } = options ?? {};
+    const builder = this.knex.queryBuilder();
+    await this.getBaseCollaboratorBuilder(builder, baseId, options);
+    builder.whereNotNull('users.id');
+    builder.orderBy('collaborator.created_time', options?.orderBy ?? 'desc');
+    builder.offset(skip);
+    builder.limit(take);
+    builder.select({
+      id: 'users.id',
+      name: 'users.name',
+      email: 'users.email',
+      avatar: 'users.avatar',
+    });
+    const res = await this.prismaService
+      .txClient()
+      .$queryRawUnsafe<IItemBaseCollaboratorUser[]>(builder.toQuery());
+    return res.map((item) => ({
+      ...item,
+      avatar: item.avatar ? getPublicFullStorageUrl(item.avatar) : null,
+    }));
+  }
+
+  /**
+   * Build space owner context for determining display user
+   * When the creator is no longer in the space, falls back to space owner
+   */
+  async buildSpaceOwnerContext(spaceIds: string[]): Promise<{
+    validCreatorSet: Set<string>;
+    spaceOwnerMap: Map<string, string>;
+  }> {
+    if (!spaceIds.length) {
+      return { validCreatorSet: new Set(), spaceOwnerMap: new Map() };
+    }
+
+    const spaceCollaborators = await this.prismaService.collaborator.findMany({
+      where: {
+        resourceType: CollaboratorType.Space,
+        resourceId: { in: spaceIds },
+        principalType: PrincipalType.User,
+      },
+      select: { resourceId: true, principalId: true, roleName: true },
+    });
+
+    const validCreatorSet = new Set(
+      spaceCollaborators.map((c) => `${c.resourceId}:${c.principalId}`)
+    );
+
+    const spaceOwnerMap = new Map(
+      spaceCollaborators
+        .filter((c) => c.roleName === Role.Owner)
+        .map((c) => [c.resourceId, c.principalId])
+    );
+
+    return { validCreatorSet, spaceOwnerMap };
   }
 }

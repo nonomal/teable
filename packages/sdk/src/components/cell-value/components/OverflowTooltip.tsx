@@ -7,10 +7,11 @@ import {
   cn,
 } from '@teable/ui-lib';
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useContentDir } from '../../../hooks/use-content-dir';
 
 interface IOverflowTooltipProps {
   text?: string;
-  maxLine?: number;
+  ellipsis?: boolean;
   className?: string;
   tooltipClassName?: string;
   style?: React.CSSProperties;
@@ -18,19 +19,19 @@ interface IOverflowTooltipProps {
 }
 
 export const OverflowTooltip = (props: IOverflowTooltipProps) => {
-  const { text = '', maxLine = 1, className, tooltipClassName, onClick } = props;
+  const { text = '', ellipsis = false, className, tooltipClassName, onClick } = props;
+  const contentDir = useContentDir();
   const [isOverflow, setOverflow] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
 
   const checkOverflow = useCallback(() => {
-    if (contentRef.current) {
+    if (contentRef.current && ellipsis) {
       const element = contentRef.current;
       const lineHeight = parseInt(window.getComputedStyle(element).lineHeight);
-      const maxHeight = lineHeight * maxLine;
-      const isOverflow = element.scrollHeight > maxHeight;
+      const isOverflow = element.scrollHeight > lineHeight;
       setOverflow(isOverflow);
     }
-  }, [maxLine]);
+  }, [ellipsis]);
 
   useEffect(() => {
     const observer = new ResizeObserver(checkOverflow);
@@ -54,15 +55,14 @@ export const OverflowTooltip = (props: IOverflowTooltipProps) => {
   const Content = (
     <div
       ref={contentRef}
-      className={cn(className, 'overflow-hidden')}
-      style={{
-        display: '-webkit-box',
-        WebkitLineClamp: maxLine > 99999 ? 99999 : maxLine,
-        WebkitBoxOrient: 'vertical',
-        wordBreak: 'break-all',
-        whiteSpace: 'pre-wrap',
+      dir={contentDir}
+      className={cn('overflow-hidden whitespace-pre-wrap break-all line-clamp-6', className)}
+      onClick={(e) => {
+        if (onClick) {
+          e.stopPropagation();
+          onClick();
+        }
       }}
-      onClick={onClick}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           onClick?.();
@@ -70,22 +70,42 @@ export const OverflowTooltip = (props: IOverflowTooltipProps) => {
       }}
       role={onClick ? 'button' : undefined}
       tabIndex={onClick ? 0 : undefined}
+      title={text}
     >
       {text}
     </div>
   );
 
-  if (!isOverflow) {
+  if (!ellipsis || !isOverflow) {
     return Content;
   }
 
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger onClick={onClick}>{Content}</TooltipTrigger>
+        <TooltipTrigger
+          onClick={(e) => {
+            if (onClick) {
+              e.stopPropagation();
+              onClick();
+            }
+          }}
+          className="w-full text-start"
+        >
+          <div
+            dir={contentDir}
+            className={cn(className, 'overflow-hidden')}
+            style={{
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {text}
+          </div>
+        </TooltipTrigger>
         <TooltipPortal>
           <TooltipContent className={cn('max-w-60 break-all', tooltipClassName)}>
-            <p>{text}</p>
+            <p dir={contentDir}>{text}</p>
           </TooltipContent>
         </TooltipPortal>
       </Tooltip>

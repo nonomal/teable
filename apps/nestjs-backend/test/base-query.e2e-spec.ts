@@ -2,28 +2,57 @@
 /* eslint-disable sonarjs/no-duplicate-string */
 import type { INestApplication } from '@nestjs/common';
 import {
+  CellFormat,
   Colors,
   FieldType,
+  contains,
+  hasAnyOf,
+  isAnyOf,
   isGreater,
   SortFunc,
   StatisticsFunc,
   TimeFormatting,
 } from '@teable/core';
-import type { ITableFullVo } from '@teable/openapi';
-import { createTable, baseQuery, BaseQueryColumnType, BaseQueryJoinType } from '@teable/openapi';
+import type { IBaseQuery, ITableFullVo } from '@teable/openapi';
+import { createTable, BaseQueryColumnType, BaseQueryJoinType } from '@teable/openapi';
+import dayjs from 'dayjs';
+import timezone from 'dayjs/plugin/timezone';
+import utc from 'dayjs/plugin/utc';
+import { BaseQueryService } from '../src/features/base/base-query/base-query.service';
 import { initApp } from './utils/init-app';
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+type AggregationCase = {
+  name: string;
+  buildQuery: () => IBaseQuery;
+  resultKey: () => string;
+  expected: unknown | ((value: unknown) => void);
+  before?: () => Promise<(() => void) | void> | (() => void);
+};
 
 describe('BaseSqlQuery e2e', () => {
   let app: INestApplication;
   const baseId = globalThis.testConfig.baseId;
+  let baseQueryService: BaseQueryService;
   beforeAll(async () => {
     const appCtx = await initApp();
     app = appCtx.app;
+    baseQueryService = app.get(BaseQueryService);
   });
 
   afterAll(async () => {
     await app.close();
   });
+
+  const baseQuery = async (
+    baseId: string,
+    baseQuery: IBaseQuery,
+    cellFormat: CellFormat = CellFormat.Text
+  ) => {
+    return await baseQueryService.baseQuery(baseId, baseQuery, cellFormat);
+  };
 
   describe('Iterate through each query capability', () => {
     let table: ITableFullVo;
@@ -93,7 +122,7 @@ describe('BaseSqlQuery e2e', () => {
         ],
       });
 
-      expect(res.data.rows).toEqual([
+      expect(res.rows).toEqual([
         expect.objectContaining({ [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 30 }),
       ]);
     });
@@ -113,8 +142,8 @@ describe('BaseSqlQuery e2e', () => {
           ],
         },
       });
-      expect(res.data.columns).toHaveLength(3);
-      expect(res.data.rows).toEqual([
+      expect(res.columns).toHaveLength(3);
+      expect(res.rows).toEqual([
         {
           [`${table.fields[0].id}`]: 'Charlie',
           [`${table.fields[1].id}`]: 40,
@@ -134,8 +163,8 @@ describe('BaseSqlQuery e2e', () => {
           },
         ],
       });
-      expect(res.data.columns).toHaveLength(3);
-      expect(res.data.rows).toEqual([
+      expect(res.columns).toHaveLength(3);
+      expect(res.rows).toEqual([
         {
           [`${table.fields[0].id}`]: 'Charlie',
           [`${table.fields[1].id}`]: 40,
@@ -181,17 +210,21 @@ describe('BaseSqlQuery e2e', () => {
           },
         ],
       });
-      expect(res.data.columns).toHaveLength(2);
-      expect(res.data.rows).toEqual([
-        {
-          [`${table.fields[2].id}`]: 'Backend Developer',
-          [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 30,
-        },
-        {
-          [`${table.fields[2].id}`]: 'Frontend Developer',
-          [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 30,
-        },
-      ]);
+      expect(res.columns).toHaveLength(2);
+      const sortByRole = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+        String(a[table.fields[2].id]).localeCompare(String(b[table.fields[2].id]));
+      expect([...res.rows].sort(sortByRole)).toEqual(
+        [
+          {
+            [`${table.fields[2].id}`]: 'Backend Developer',
+            [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 30,
+          },
+          {
+            [`${table.fields[2].id}`]: 'Frontend Developer',
+            [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 30,
+          },
+        ].sort(sortByRole)
+      );
     });
 
     it('groupBy with date', async () => {
@@ -238,8 +271,8 @@ describe('BaseSqlQuery e2e', () => {
         from: table.id,
         groupBy: [{ column: table.fields[1].id, type: BaseQueryColumnType.Field }],
       });
-      expect(res.data.columns).toHaveLength(1);
-      expect(res.data.rows).toEqual(
+      expect(res.columns).toHaveLength(1);
+      expect(res.rows).toEqual(
         expect.arrayContaining([
           { [`${table.fields[1].id}`]: '2024-01-01' },
           { [`${table.fields[1].id}`]: '2024-01-02' },
@@ -274,12 +307,79 @@ describe('BaseSqlQuery e2e', () => {
         from: table.id,
         groupBy: [{ column: table.fields[0].id, type: BaseQueryColumnType.Field }],
       });
-      console.log('res.data', res.data);
-      expect(res.data.columns).toHaveLength(1);
-      expect(res.data.rows).toEqual([
-        {},
-        { [`${table.fields[0].id}`]: globalThis.testConfig.userName },
-      ]);
+      expect(res.columns).toHaveLength(1);
+      const sortByUser = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+        String(a[table.fields[0].id] ?? '').localeCompare(String(b[table.fields[0].id] ?? ''));
+      expect([...res.rows].sort(sortByUser)).toEqual(
+        [{}, { [`${table.fields[0].id}`]: globalThis.testConfig.userName }].sort(sortByUser)
+      );
+    });
+
+    it('filters multi-user field with pre-qualified column names', async () => {
+      const table = await createTable(baseId, {
+        fields: [
+          {
+            name: 'members',
+            type: FieldType.User,
+            options: {
+              isMultiple: true,
+            },
+          },
+        ],
+        records: [
+          {
+            fields: {
+              members: [
+                {
+                  id: globalThis.testConfig.userId,
+                  title: globalThis.testConfig.userName,
+                  email: globalThis.testConfig.email,
+                },
+              ],
+            },
+          },
+          {
+            fields: {
+              members: [],
+            },
+          },
+        ],
+      }).then((res) => res.data);
+      const membersField = table.fields.find((field) => field.name === 'members');
+      expect(membersField).toBeDefined();
+      try {
+        const res = await baseQuery(
+          baseId,
+          {
+            from: table.id,
+            select: [
+              {
+                column: membersField!.id,
+                type: BaseQueryColumnType.Field,
+              },
+            ],
+            where: {
+              conjunction: 'and',
+              filterSet: [
+                {
+                  column: membersField!.id,
+                  type: BaseQueryColumnType.Field,
+                  operator: hasAnyOf.value,
+                  value: [globalThis.testConfig.userId],
+                },
+              ],
+            },
+          },
+          CellFormat.Json
+        );
+
+        expect(res.rows).toHaveLength(1);
+        expect(res.rows[0][membersField!.id]).toEqual([
+          expect.objectContaining({ id: globalThis.testConfig.userId }),
+        ]);
+      } finally {
+        // no additional cleanup required
+      }
     });
 
     it('limit and offset', async () => {
@@ -288,8 +388,8 @@ describe('BaseSqlQuery e2e', () => {
         limit: 1,
         offset: 1,
       });
-      expect(res.data.columns).toHaveLength(3);
-      expect(res.data.rows).toHaveLength(1);
+      expect(res.columns).toHaveLength(3);
+      expect(res.rows).toHaveLength(1);
     });
 
     describe('from', () => {
@@ -310,8 +410,8 @@ describe('BaseSqlQuery e2e', () => {
             },
           },
         });
-        expect(res.data.columns).toHaveLength(3);
-        expect(res.data.rows).toEqual([
+        expect(res.columns).toHaveLength(3);
+        expect(res.rows).toEqual([
           {
             [`${table.fields[0].id}`]: 'Charlie',
             [`${table.fields[1].id}`]: 40,
@@ -350,10 +450,8 @@ describe('BaseSqlQuery e2e', () => {
             },
           ],
         });
-        expect(res.data.columns).toHaveLength(1);
-        expect(res.data.rows).toEqual([
-          { [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 40 },
-        ]);
+        expect(res.columns).toHaveLength(1);
+        expect(res.rows).toEqual([{ [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 40 }]);
       });
 
       it('from query include aggregation', async () => {
@@ -375,10 +473,8 @@ describe('BaseSqlQuery e2e', () => {
             ],
           },
         });
-        expect(res.data.columns).toHaveLength(1);
-        expect(res.data.rows).toEqual([
-          { [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 30 },
-        ]);
+        expect(res.columns).toHaveLength(1);
+        expect(res.rows).toEqual([{ [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 30 }]);
       });
 
       it('from query include aggregation and filter', async () => {
@@ -411,10 +507,8 @@ describe('BaseSqlQuery e2e', () => {
             },
           },
         });
-        expect(res.data.columns).toHaveLength(1);
-        expect(res.data.rows).toEqual([
-          { [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 40 },
-        ]);
+        expect(res.columns).toHaveLength(1);
+        expect(res.rows).toEqual([{ [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 40 }]);
       });
 
       it('from query include aggregation and filter and orderBy and groupBy', async () => {
@@ -460,10 +554,8 @@ describe('BaseSqlQuery e2e', () => {
             ],
           },
         });
-        expect(res.data.columns).toHaveLength(1);
-        expect(res.data.rows).toEqual([
-          { [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 40 },
-        ]);
+        expect(res.columns).toHaveLength(1);
+        expect(res.rows).toEqual([{ [`${table.fields[1].id}_${StatisticsFunc.Average}`]: 40 }]);
       });
 
       it('from query include aggregation, filter query aggregation field', async () => {
@@ -513,8 +605,8 @@ describe('BaseSqlQuery e2e', () => {
             ],
           },
         });
-        expect(res.data.columns).toHaveLength(2);
-        expect(res.data.rows).toEqual([
+        expect(res.columns).toHaveLength(2);
+        expect(res.rows).toEqual([
           {
             [`${table.fields[1].id}_${StatisticsFunc.Sum}`]: 60,
             [`${table.fields[2].id}`]: 'Frontend Developer',
@@ -593,8 +685,8 @@ describe('BaseSqlQuery e2e', () => {
             ],
           },
         });
-        expect(res.data.columns).toHaveLength(2);
-        expect(res.data.rows).toEqual([
+        expect(res.columns).toHaveLength(2);
+        expect(res.rows).toEqual([
           {
             [`${table.fields[1].id}_${StatisticsFunc.Sum}`]: 60,
             [`${table.fields[2].id}`]: 'Frontend Developer',
@@ -605,6 +697,247 @@ describe('BaseSqlQuery e2e', () => {
           },
         ]);
       });
+    });
+  });
+
+  describe('Dashboard statistics combinations', () => {
+    let statsTable: ITableFullVo;
+    let statsRecordField: ITableFullVo['fields'][number];
+    let statsScoreField: ITableFullVo['fields'][number];
+    let statsStatusField: ITableFullVo['fields'][number];
+    let statsDueField: ITableFullVo['fields'][number];
+    let statsAssigneesField: ITableFullVo['fields'][number];
+
+    const statsAggregationCases: AggregationCase[] = [
+      {
+        name: 'sums score values greater than 25',
+        buildQuery: () => ({
+          from: statsTable.id,
+          aggregation: [
+            {
+              column: statsScoreField.id,
+              type: BaseQueryColumnType.Field,
+              statisticFunc: StatisticsFunc.Sum,
+            },
+          ],
+          where: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                column: statsScoreField.id,
+                type: BaseQueryColumnType.Field,
+                operator: isGreater.value,
+                value: 25,
+              },
+            ],
+          },
+        }),
+        resultKey: () => `${statsScoreField.id}_${StatisticsFunc.Sum}`,
+        expected: 70,
+      },
+      {
+        name: 'averages score for Todo records',
+        buildQuery: () => ({
+          from: statsTable.id,
+          aggregation: [
+            {
+              column: statsScoreField.id,
+              type: BaseQueryColumnType.Field,
+              statisticFunc: StatisticsFunc.Average,
+            },
+          ],
+          where: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                column: statsStatusField.id,
+                type: BaseQueryColumnType.Field,
+                operator: isAnyOf.value,
+                value: ['Todo'],
+              },
+            ],
+          },
+        }),
+        resultKey: () => `${statsScoreField.id}_${StatisticsFunc.Average}`,
+        expected: 30,
+      },
+      {
+        name: 'selects latest due date for assigned user',
+        buildQuery: () => ({
+          from: statsTable.id,
+          aggregation: [
+            {
+              column: statsDueField.id,
+              type: BaseQueryColumnType.Field,
+              statisticFunc: StatisticsFunc.LatestDate,
+            },
+          ],
+          where: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                column: statsAssigneesField.id,
+                type: BaseQueryColumnType.Field,
+                operator: hasAnyOf.value,
+                value: [globalThis.testConfig.userId],
+              },
+            ],
+          },
+        }),
+        resultKey: () => `${statsDueField.id}_${StatisticsFunc.LatestDate}`,
+        expected: (value: unknown) => {
+          expect(typeof value === 'string' || value instanceof Date).toBe(true);
+          const zoned = dayjs(value as string).tz('Asia/Shanghai');
+          expect(zoned.isValid()).toBe(true);
+          expect(zoned.year()).toBe(2024);
+          expect(zoned.month()).toBe(0);
+          expect(zoned.date()).toBe(10);
+        },
+      },
+      {
+        name: 'counts status entries when record contains Beta',
+        buildQuery: () => ({
+          from: statsTable.id,
+          aggregation: [
+            {
+              column: statsStatusField.id,
+              type: BaseQueryColumnType.Field,
+              statisticFunc: StatisticsFunc.Count,
+            },
+          ],
+          where: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                column: statsRecordField.id,
+                type: BaseQueryColumnType.Field,
+                operator: contains.value,
+                value: 'Beta',
+              },
+            ],
+          },
+        }),
+        resultKey: () => `${statsStatusField.id}_${StatisticsFunc.Count}`,
+        expected: 1,
+      },
+    ];
+
+    beforeAll(async () => {
+      statsTable = await createTable(baseId, {
+        fields: [
+          {
+            name: 'record',
+            type: FieldType.SingleLineText,
+          },
+          {
+            name: 'score',
+            type: FieldType.Number,
+          },
+          {
+            name: 'status',
+            type: FieldType.SingleSelect,
+            options: {
+              choices: [
+                { name: 'Todo', color: Colors.Red },
+                { name: 'In Progress', color: Colors.Blue },
+              ],
+            },
+          },
+          {
+            name: 'due',
+            type: FieldType.Date,
+            options: {
+              formatting: {
+                date: 'YYYY-MM-DD',
+                time: TimeFormatting.None,
+                timeZone: 'Asia/Shanghai',
+              },
+            },
+          },
+          {
+            name: 'assignees',
+            type: FieldType.User,
+            options: {
+              isMultiple: true,
+            },
+          },
+        ],
+        records: [
+          {
+            fields: {
+              record: 'Alpha',
+              score: 20,
+              status: 'Todo',
+              due: '2024-01-02',
+              assignees: [
+                {
+                  id: globalThis.testConfig.userId,
+                  title: globalThis.testConfig.userName,
+                  email: globalThis.testConfig.email,
+                },
+              ],
+            },
+          },
+          {
+            fields: {
+              record: 'Beta',
+              score: 30,
+              status: 'In Progress',
+              due: '2024-01-05',
+              assignees: [],
+            },
+          },
+          {
+            fields: {
+              record: 'Gamma',
+              score: 40,
+              status: 'Todo',
+              due: '2024-01-10',
+              assignees: [
+                {
+                  id: globalThis.testConfig.userId,
+                  title: globalThis.testConfig.userName,
+                  email: globalThis.testConfig.email,
+                },
+              ],
+            },
+          },
+        ],
+      }).then((res) => res.data);
+
+      const fieldByName = (fieldName: string) => {
+        const field = statsTable.fields.find((cur) => cur.name === fieldName);
+        if (!field) {
+          throw new Error(`Field ${fieldName} not found in stats table`);
+        }
+        return field;
+      };
+
+      statsRecordField = fieldByName('record');
+      statsScoreField = fieldByName('score');
+      statsStatusField = fieldByName('status');
+      statsDueField = fieldByName('due');
+      statsAssigneesField = fieldByName('assignees');
+    });
+
+    it.each(statsAggregationCases)('%s', async (testCase) => {
+      const cleanupCandidate = testCase.before ? await testCase.before() : undefined;
+      const cleanup = typeof cleanupCandidate === 'function' ? cleanupCandidate : undefined;
+
+      try {
+        const result = await baseQuery(baseId, testCase.buildQuery(), CellFormat.Json);
+        expect(result.rows).toHaveLength(1);
+        const key = testCase.resultKey();
+        expect(result.columns.some((column) => column.column === key)).toBe(true);
+        const value = result.rows[0][key];
+        if (typeof testCase.expected === 'function') {
+          (testCase.expected as (val: unknown) => void)(value);
+        } else {
+          expect(value).toEqual(testCase.expected);
+        }
+      } finally {
+        cleanup?.();
+      }
     });
   });
 
@@ -690,8 +1023,8 @@ describe('BaseSqlQuery e2e', () => {
           },
         ],
       });
-      expect(res.data.columns).toHaveLength(4);
-      expect(res.data.rows).toEqual([
+      expect(res.columns).toHaveLength(4);
+      expect(res.rows).toEqual([
         {
           [`${table1.fields[0].id}`]: 'Alice',
           [`${table1.fields[1].id}`]: 20,
@@ -722,8 +1055,8 @@ describe('BaseSqlQuery e2e', () => {
           },
         ],
       });
-      expect(res.data.columns).toHaveLength(4);
-      expect(res.data.rows).toEqual([
+      expect(res.columns).toHaveLength(4);
+      expect(res.rows).toEqual([
         {
           [`${table1.fields[0].id}`]: 'Alice',
           [`${table1.fields[1].id}`]: 20,
@@ -771,8 +1104,8 @@ describe('BaseSqlQuery e2e', () => {
           },
         ],
       });
-      expect(res.data.columns).toHaveLength(2);
-      expect(res.data.rows).toEqual([
+      expect(res.columns).toHaveLength(2);
+      expect(res.rows).toEqual([
         {
           [`${table1.fields[0].id}`]: 'Bob',
           [`${table2.fields[0].id}`]: 'Eve',

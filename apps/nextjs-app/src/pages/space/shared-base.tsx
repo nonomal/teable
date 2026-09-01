@@ -3,7 +3,7 @@ import { ReactQueryKeys } from '@teable/sdk/config';
 import type { GetServerSideProps } from 'next';
 import type { ReactElement } from 'react';
 import { SharedBasePage } from '@/features/app/blocks/space/SharedBasePage';
-import { SpaceLayout } from '@/features/app/layouts/SpaceLayout';
+import { SharedBaseLayout } from '@/features/app/layouts/SharedBaseLayout';
 import { spaceConfig } from '@/features/i18n/space.config';
 import ensureLogin from '@/lib/ensureLogin';
 import { getTranslationsProps } from '@/lib/i18n';
@@ -40,6 +40,6 @@ export const getServerSideProps: GetServerSideProps = withEnv(
 );
 
 Node.getLayout = function getLayout(page: ReactElement, pageProps) {
-  return <SpaceLayout {...pageProps}>{page}</SpaceLayout>;
+  return <SharedBaseLayout {...pageProps}>{page}</SharedBaseLayout>;
 };
 export default Node;

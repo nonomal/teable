@@ -1,44 +1,111 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type { ISendMailOptions } from '@nestjs-modules/mailer';
-import type { INotificationBuffer, INotificationUrl } from '@teable/core';
+import type { ILocalization, INotificationBuffer, INotificationUrl } from '@teable/core';
 import {
+  assertNever,
   generateNotificationId,
   getUserNotificationChannel,
   NotificationStatesEnum,
+  NotificationSeverityEnum,
   NotificationTypeEnum,
   notificationUrlSchema,
-  userIconSchema,
   SYSTEM_USER_ID,
-  assertNever,
+  userIconSchema,
 } from '@teable/core';
 import type { Prisma } from '@teable/db-main-prisma';
 import { PrismaService } from '@teable/db-main-prisma';
+import { MailTransporterType, MailType } from '@teable/openapi';
 import {
-  UploadType,
   type IGetNotifyListQuery,
   type INotificationUnreadCountVo,
   type INotificationVo,
   type IUpdateNotifyStatusRo,
 } from '@teable/openapi';
 import { keyBy } from 'lodash';
+import { I18nContext, I18nService } from 'nestjs-i18n';
 import { IMailConfig, MailConfig } from '../../configs/mail.config';
 import { ShareDbService } from '../../share-db/share-db.service';
-import StorageAdapter from '../attachments/plugins/adapter';
-import { getFullStorageUrl } from '../attachments/plugins/utils';
+import type { I18nPath, I18nTranslations } from '../../types/i18n.generated';
+import { getPublicFullStorageUrl } from '../attachments/plugins/utils';
 import { MailSenderService } from '../mail-sender/mail-sender.service';
 import { UserService } from '../user/user.service';
+
+type INotifyEmailConfig = {
+  title: string | ILocalization<I18nPath>;
+  message: string | ILocalization<I18nPath>;
+  buttonUrl?: string;
+  buttonText?: string | ILocalization<I18nPath>;
+};
+
+function toArray<T>(value?: T | T[]): T[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+const notificationListLimit = 10;
+
+const notificationListSelect = {
+  id: true,
+  fromUserId: true,
+  type: true,
+  urlPath: true,
+  message: true,
+  messageI18n: true,
+  severity: true,
+  isRead: true,
+  createdTime: true,
+} satisfies Prisma.NotificationSelect;
+
+type INotificationListRecord = Prisma.NotificationGetPayload<{
+  select: typeof notificationListSelect;
+}>;
 
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
-
+  private readonly mailTypeMap: Record<NotificationTypeEnum, MailType> = {
+    [NotificationTypeEnum.System]: MailType.System,
+    [NotificationTypeEnum.CollaboratorCellTag]: MailType.CollaboratorCellTag,
+    [NotificationTypeEnum.CollaboratorMultiRowTag]: MailType.CollaboratorMultiRowTag,
+    [NotificationTypeEnum.Comment]: MailType.Common,
+    [NotificationTypeEnum.ExportBase]: MailType.ExportBase,
+    [NotificationTypeEnum.AdminNotice]: MailType.System,
+    [NotificationTypeEnum.CollaboratorInvite]: MailType.Common,
+  };
   constructor(
     private readonly prismaService: PrismaService,
     private readonly shareDbService: ShareDbService,
     private readonly mailSenderService: MailSenderService,
     private readonly userService: UserService,
-    @MailConfig() private readonly mailConfig: IMailConfig
+    @MailConfig() private readonly mailConfig: IMailConfig,
+    private readonly i18n: I18nService<I18nTranslations>
   ) {}
+
+  getUserLang(lang?: string | null) {
+    return lang ?? I18nContext.current()?.lang;
+  }
+
+  getMessage(text: string | ILocalization<I18nPath>, lang?: string) {
+    return typeof text === 'string'
+      ? text
+      : (this.i18n.t(text.i18nKey, {
+          args: text.context,
+          lang: lang ?? I18nContext.current()?.lang,
+        }) as string);
+  }
+
+  /**
+   * notification message i18n use common prefix, so we need to remove it to save db
+   */
+  getMessageI18n(localization: string | ILocalization<I18nPath>) {
+    return typeof localization === 'string'
+      ? undefined
+      : JSON.stringify({
+          // remove common prefix
+          // eg: common.email.templates -> email.templates
+          i18nKey: localization.i18nKey.replace(/^common\./, ''),
+          context: localization.context,
+        });
+  }
 
   async sendCollaboratorNotify(params: {
     fromUserId: string;
@@ -49,8 +116,9 @@ export class NotificationService {
       tableName: string;
       fieldName: string;
       recordIds: string[];
+      recordTitles: { id: string; title: string }[];
     };
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { fromUserId, toUserId, refRecord } = params;
     const [fromUser, toUser] = await Promise.all([
       this.userService.getUserById(fromUserId),
@@ -58,22 +126,15 @@ export class NotificationService {
     ]);
 
     if (!fromUser || !toUser || fromUserId === toUserId) {
-      return;
+      return false;
     }
 
     const notifyId = generateNotificationId();
-    const emailOptions = this.mailSenderService.collaboratorCellTagEmailOptions({
-      notifyId,
-      fromUserName: fromUser.name,
-      refRecord,
-    });
 
     const userIcon = userIconSchema.parse({
       userId: fromUser.id,
       userName: fromUser.name,
-      userAvatarUrl:
-        fromUser?.avatar &&
-        getFullStorageUrl(StorageAdapter.getBucket(UploadType.Avatar), fromUser.avatar),
+      userAvatarUrl: fromUser?.avatar && getPublicFullStorageUrl(fromUser.avatar),
     });
 
     const urlMeta = notificationUrlSchema.parse({
@@ -88,12 +149,34 @@ export class NotificationService {
 
     const notifyPath = this.generateNotifyPath(type as NotificationTypeEnum, urlMeta);
 
+    let message: string | ILocalization<I18nPath> = '';
+    if (refRecord.recordIds.length <= 1) {
+      message = {
+        i18nKey: 'common.email.templates.collaboratorCellTag.subject',
+        context: {
+          fromUserName: fromUser.name,
+          fieldName: refRecord.fieldName,
+          tableName: refRecord.tableName,
+        },
+      };
+    } else {
+      message = {
+        i18nKey: 'common.email.templates.collaboratorMultiRowTag.subject',
+        context: {
+          fromUserName: fromUser.name,
+          refLength: refRecord.recordIds.length.toString(),
+          tableName: refRecord.tableName,
+        },
+      };
+    }
     const data: Prisma.NotificationCreateInput = {
       id: notifyId,
       fromUserId,
       toUserId,
       type,
-      message: emailOptions.notifyMessage,
+      message: this.getMessage(message, 'en'),
+      messageI18n: this.getMessageI18n(message),
+      severity: NotificationSeverityEnum.Info,
       urlPath: notifyPath,
       createdBy: fromUserId,
     };
@@ -105,9 +188,11 @@ export class NotificationService {
       notification: {
         id: notifyData.id,
         message: notifyData.message,
+        messageI18n: notifyData.messageI18n,
         notifyIcon: userIcon,
         notifyType: notifyData.type as NotificationTypeEnum,
-        url: this.mailConfig.origin + notifyPath,
+        url: notifyPath,
+        severity: NotificationSeverityEnum.Info,
         isRead: false,
         createdTime: notifyData.createdTime.toISOString(),
       },
@@ -116,33 +201,46 @@ export class NotificationService {
 
     this.sendNotifyBySocket(toUser.id, socketNotification);
 
+    const emailOptions = await this.mailSenderService.collaboratorCellTagEmailOptions({
+      notifyId,
+      fromUserName: fromUser.name,
+      refRecord,
+    });
     if (toUser.notifyMeta && toUser.notifyMeta.email) {
-      this.sendNotifyByMail(toUser.email, emailOptions);
+      this.mailSenderService.sendMail(
+        {
+          to: toUser.email,
+          ...emailOptions,
+        },
+        {
+          type: this.mailTypeMap[type],
+          transporterName: MailTransporterType.Notify,
+        }
+      );
     }
+    return true;
   }
 
-  async sendCommonNotify(
+  async sendHtmlContentNotify(
     params: {
       path: string;
       fromUserId?: string;
       toUserId: string;
-      message: string;
-      emailConfig?: {
-        title: string;
-        message: string;
-        buttonUrl?: string; // use path as default
-        buttonText?: string; // use 'View' as default
-      };
+      message: string | ILocalization<I18nPath>;
+      severity?: NotificationSeverityEnum;
+      emailConfig?: INotifyEmailConfig;
     },
     type = NotificationTypeEnum.System
   ) {
-    const { toUserId, emailConfig, message, path, fromUserId = SYSTEM_USER_ID } = params;
+    const { toUserId, emailConfig, path, fromUserId = SYSTEM_USER_ID } = params;
     const notifyId = generateNotificationId();
     const toUser = await this.userService.getUserById(toUserId);
     if (!toUser) {
       return;
     }
 
+    const severity = params.severity ?? this.getNotificationSeverity(type);
+    const messageI18n = this.getMessageI18n(params.message);
     const data: Prisma.NotificationCreateInput = {
       id: notifyId,
       fromUserId: fromUserId,
@@ -150,7 +248,9 @@ export class NotificationService {
       type,
       urlPath: path,
       createdBy: fromUserId,
-      message,
+      message: this.getMessage(params.message, 'en'),
+      messageI18n,
+      severity,
     };
     const notifyData = await this.createNotify(data);
 
@@ -172,9 +272,11 @@ export class NotificationService {
       notification: {
         id: notifyData.id,
         message: notifyData.message,
+        messageI18n: notifyData.messageI18n,
         notifyType: type,
-        url: this.mailConfig.origin + path,
+        url: path,
         notifyIcon: systemNotifyIcon,
+        severity,
         isRead: false,
         createdTime: notifyData.createdTime.toISOString(),
       },
@@ -184,21 +286,151 @@ export class NotificationService {
     this.sendNotifyBySocket(toUser.id, socketNotification);
 
     if (emailConfig && toUser.notifyMeta && toUser.notifyMeta.email) {
-      const emailOptions = this.mailSenderService.commonEmailOptions({
+      const lang = this.getUserLang(toUser.lang);
+      const emailOptions = await this.mailSenderService.htmlEmailOptions({
         ...emailConfig,
+        title: this.getMessage(emailConfig.title, lang),
+        message: this.getMessage(emailConfig.message, lang),
         to: toUserId,
         buttonUrl: emailConfig.buttonUrl || this.mailConfig.origin + path,
-        buttonText: emailConfig.buttonText || 'View',
+        buttonText: emailConfig.buttonText
+          ? this.getMessage(emailConfig.buttonText, lang)
+          : this.i18n.t('common.email.templates.notify.buttonText'),
       });
-      this.sendNotifyByMail(toUser.email, emailOptions);
+      this.mailSenderService.sendMail(
+        {
+          to: toUser.email,
+          ...emailOptions,
+        },
+        {
+          type: this.mailTypeMap[type],
+          transporterName: MailTransporterType.Notify,
+        }
+      );
     }
+  }
+
+  async sendCommonNotify(
+    params: {
+      path?: string;
+      fromUserId?: string;
+      toUserId?: string | string[];
+      toEmail?: string | string[];
+      message: string | ILocalization<I18nPath>;
+      severity?: NotificationSeverityEnum;
+      emailConfig?: INotifyEmailConfig;
+    },
+    type = NotificationTypeEnum.System
+  ): Promise<{
+    sentCount: number;
+    invalidUserIds?: string[];
+    invalidEmails?: string[];
+  }> {
+    const { emailConfig, path = '', fromUserId = SYSTEM_USER_ID } = params;
+    const ids = toArray(params.toUserId);
+    const emails = toArray(params.toEmail);
+
+    const toUsers = await this.userService.getUsersByIdsOrEmails({ ids, emails });
+
+    const invalidUserIds = ids.length
+      ? ids.filter((id) => !toUsers.some((u) => u.id === id))
+      : undefined;
+    const invalidEmails = emails.length
+      ? emails.filter((e) => !toUsers.some((u) => u.email.toLowerCase() === e.toLowerCase()))
+      : undefined;
+
+    if (toUsers.length === 0) {
+      return { sentCount: 0, invalidUserIds, invalidEmails };
+    }
+
+    const severity = params.severity ?? this.getNotificationSeverity(type);
+    const messageI18n = this.getMessageI18n(params.message);
+    const messageEn = this.getMessage(params.message, 'en');
+
+    const rawUsers = await this.prismaService.user.findMany({
+      select: { id: true, name: true, avatar: true },
+      where: { id: fromUserId },
+    });
+    const fromUserSets = keyBy(rawUsers, 'id');
+    const notifyIcon = this.generateNotifyIcon(type, fromUserId, fromUserSets);
+
+    const createdTime = new Date();
+    const notifyRecords = toUsers.map((toUser) => ({
+      id: generateNotificationId(),
+      fromUserId,
+      toUserId: toUser.id,
+      type,
+      urlPath: path,
+      createdBy: fromUserId,
+      message: messageEn,
+      messageI18n,
+      severity,
+      createdTime,
+    }));
+
+    const toUserIdList = toUsers.map((u) => u.id);
+    const unreadCounts = await this.prismaService.notification.groupBy({
+      by: ['toUserId'],
+      where: { toUserId: { in: toUserIdList }, isRead: false },
+      _count: { _all: true },
+    });
+    const unreadCountMap = new Map(unreadCounts.map((r) => [r.toUserId, r._count._all]));
+
+    await this.prismaService.notification.createMany({ data: notifyRecords });
+
+    const notifyById = keyBy(notifyRecords, 'toUserId');
+    for (const toUser of toUsers) {
+      const record = notifyById[toUser.id];
+      const unreadCount = (unreadCountMap.get(toUser.id) ?? 0) + 1;
+
+      this.sendNotifyBySocket(toUser.id, {
+        notification: {
+          id: record.id,
+          message: messageEn,
+          messageI18n,
+          notifyType: type,
+          url: path,
+          notifyIcon: notifyIcon,
+          severity,
+          isRead: false,
+          createdTime: createdTime.toISOString(),
+        },
+        unreadCount,
+      });
+
+      if (emailConfig && toUser.notifyMeta && toUser.notifyMeta.email) {
+        const lang = this.getUserLang(toUser.lang);
+        const emailOptions = await this.mailSenderService.commonEmailOptions({
+          ...emailConfig,
+          title: this.getMessage(emailConfig.title, lang),
+          message: this.getMessage(emailConfig.message, lang),
+          to: toUser.id,
+          buttonUrl: emailConfig.buttonUrl || this.mailConfig.origin + path,
+          buttonText: emailConfig.buttonText
+            ? this.getMessage(emailConfig.buttonText, lang)
+            : this.i18n.t('common.email.templates.notify.buttonText'),
+        });
+        this.mailSenderService.sendMail(
+          {
+            to: toUser.email,
+            ...emailOptions,
+          },
+          {
+            type: this.mailTypeMap[type],
+            transporterName: MailTransporterType.Notify,
+          }
+        );
+      }
+    }
+
+    return { sentCount: toUsers.length, invalidUserIds, invalidEmails };
   }
 
   async sendImportResultNotify(params: {
     tableId: string;
     baseId: string;
     toUserId: string;
-    message: string;
+    message: string | ILocalization<I18nPath>;
   }) {
     const { toUserId, tableId, message, baseId } = params;
     const toUser = await this.userService.getUserById(toUserId);
@@ -216,11 +448,40 @@ export class NotificationService {
       path: notifyPath,
       toUserId,
       message,
+      severity: NotificationSeverityEnum.Info,
       emailConfig: {
-        title: 'Import result notification',
-        message: message,
+        title: { i18nKey: 'common.email.templates.notify.import.title' },
+        message,
       },
     });
+  }
+
+  async sendExportBaseResultNotify(params: {
+    baseId: string;
+    toUserId: string;
+    message: string | ILocalization<I18nPath>;
+  }) {
+    const { toUserId, message } = params;
+    const toUser = await this.userService.getUserById(toUserId);
+    if (!toUser) {
+      return;
+    }
+    const type = NotificationTypeEnum.ExportBase;
+    const isFailed = typeof message === 'string' ? false : message.i18nKey.includes('.failed');
+
+    this.sendHtmlContentNotify(
+      {
+        path: '',
+        toUserId,
+        message,
+        severity: isFailed ? NotificationSeverityEnum.Warning : NotificationSeverityEnum.Info,
+        emailConfig: {
+          title: { i18nKey: 'common.email.templates.notify.exportBase.title' },
+          message: message,
+        },
+      },
+      type
+    );
   }
 
   async sendCommentNotify(params: {
@@ -229,7 +490,7 @@ export class NotificationService {
     recordId: string;
     commentId: string;
     toUserId: string;
-    message: string;
+    message: string | ILocalization<I18nPath>;
     fromUserId: string;
   }) {
     const { toUserId, tableId, message, baseId, commentId, recordId, fromUserId } = params;
@@ -252,8 +513,9 @@ export class NotificationService {
         fromUserId,
         toUserId,
         message,
+        severity: NotificationSeverityEnum.Info,
         emailConfig: {
-          title: 'Record comment notification',
+          title: { i18nKey: 'common.email.templates.notify.recordComment.title' },
           message: message,
         },
       },
@@ -262,22 +524,78 @@ export class NotificationService {
   }
 
   async getNotifyList(userId: string, query: IGetNotifyListQuery): Promise<INotificationVo> {
-    const { notifyStates, cursor } = query;
-    const limit = 10;
+    const { notifyStates, cursor, severity, notifyType } = query;
+    const where: Prisma.NotificationWhereInput = {
+      toUserId: userId,
+      isRead: notifyStates === NotificationStatesEnum.Read,
+    };
+    const listWhere: Prisma.NotificationWhereInput = {
+      ...where,
+      ...(severity ? { severity } : {}),
+      ...(notifyType ? { type: notifyType } : {}),
+    };
 
+    const [{ records, nextCursor }, summary] = await Promise.all([
+      this.getNotificationRecords(listWhere, cursor),
+      this.getNotificationListSummary(where),
+    ]);
+
+    const notifications = await this.getNotificationListVos(records);
+    return {
+      notifications,
+      nextCursor,
+      summary,
+    };
+  }
+
+  private async getNotificationRecords(
+    where: Prisma.NotificationWhereInput,
+    cursor?: string | null
+  ) {
     const data = await this.prismaService.notification.findMany({
-      where: {
-        toUserId: userId,
-        isRead: notifyStates === NotificationStatesEnum.Read,
-      },
-      take: limit + 1,
+      select: notificationListSelect,
+      where,
+      take: notificationListLimit + 1,
       cursor: cursor ? { id: cursor } : undefined,
+      skip: cursor ? 1 : undefined,
       orderBy: {
         createdTime: 'desc',
       },
     });
 
-    // Doesn't seem like a good way
+    return this.takeNotificationPage(data);
+  }
+
+  private takeNotificationPage(records: INotificationListRecord[]) {
+    const pageRecords = records.slice(0, notificationListLimit);
+    return {
+      records: pageRecords,
+      nextCursor:
+        records.length > notificationListLimit
+          ? pageRecords[pageRecords.length - 1]?.id
+          : undefined,
+    };
+  }
+
+  private async getNotificationListSummary(where: Prisma.NotificationWhereInput) {
+    const groups = await this.prismaService.notification.groupBy({
+      by: ['severity'],
+      where,
+      _count: { _all: true },
+    });
+
+    const result = {
+      [NotificationSeverityEnum.Critical]: 0,
+      [NotificationSeverityEnum.Warning]: 0,
+      [NotificationSeverityEnum.Info]: 0,
+    };
+    for (const g of groups) {
+      result[g.severity as NotificationSeverityEnum] = g._count._all;
+    }
+    return result;
+  }
+
+  private async getNotificationListVos(data: INotificationListRecord[]) {
     const fromUserIds = data.map((v) => v.fromUserId);
     const rawUsers = await this.prismaService.user.findMany({
       select: { id: true, name: true, avatar: true },
@@ -285,7 +603,7 @@ export class NotificationService {
     });
     const fromUserSets = keyBy(rawUsers, 'id');
 
-    const notifications = data.map((v) => {
+    return data.map((v) => {
       const notifyIcon = this.generateNotifyIcon(
         v.type as NotificationTypeEnum,
         v.fromUserId,
@@ -295,22 +613,14 @@ export class NotificationService {
         id: v.id,
         notifyIcon: notifyIcon,
         notifyType: v.type as NotificationTypeEnum,
-        url: this.mailConfig.origin + v.urlPath,
+        url: v.urlPath || '',
         message: v.message,
+        messageI18n: v.messageI18n,
+        severity: this.getNotificationSeverity(v.type as NotificationTypeEnum, v.severity),
         isRead: v.isRead,
         createdTime: v.createdTime.toISOString(),
       };
     });
-
-    let nextCursor: typeof cursor | undefined = undefined;
-    if (notifications.length > limit) {
-      const nextItem = notifications.pop();
-      nextCursor = nextItem!.id;
-    }
-    return {
-      notifications,
-      nextCursor,
-    };
   }
 
   private generateNotifyIcon(
@@ -318,23 +628,48 @@ export class NotificationService {
     fromUserId: string,
     fromUserSets: Record<string, { id: string; name: string; avatar: string | null }>
   ) {
-    const origin = this.mailConfig.origin;
-
     switch (notifyType) {
       case NotificationTypeEnum.System:
-        return { iconUrl: `${origin}/images/favicon/favicon.svg` };
+      case NotificationTypeEnum.ExportBase:
+      case NotificationTypeEnum.AdminNotice:
+        return { iconUrl: '/images/favicon/favicon.svg' };
       case NotificationTypeEnum.Comment:
       case NotificationTypeEnum.CollaboratorCellTag:
-      case NotificationTypeEnum.CollaboratorMultiRowTag: {
+      case NotificationTypeEnum.CollaboratorMultiRowTag:
+      case NotificationTypeEnum.CollaboratorInvite: {
         const { id, name, avatar } = fromUserSets[fromUserId];
 
         return {
           userId: id,
           userName: name,
-          userAvatarUrl:
-            avatar && getFullStorageUrl(StorageAdapter.getBucket(UploadType.Avatar), avatar),
+          userAvatarUrl: avatar && getPublicFullStorageUrl(avatar),
         };
       }
+      default:
+        throw assertNever(notifyType);
+    }
+  }
+
+  private getNotificationSeverity(
+    notifyType: NotificationTypeEnum,
+    severity?: string
+  ): NotificationSeverityEnum {
+    if (
+      severity &&
+      Object.values(NotificationSeverityEnum).includes(severity as NotificationSeverityEnum)
+    ) {
+      return severity as NotificationSeverityEnum;
+    }
+
+    switch (notifyType) {
+      case NotificationTypeEnum.Comment:
+      case NotificationTypeEnum.CollaboratorCellTag:
+      case NotificationTypeEnum.CollaboratorMultiRowTag:
+      case NotificationTypeEnum.ExportBase:
+      case NotificationTypeEnum.System:
+      case NotificationTypeEnum.AdminNotice:
+      case NotificationTypeEnum.CollaboratorInvite:
+        return NotificationSeverityEnum.Info;
       default:
         throw assertNever(notifyType);
     }
@@ -344,19 +679,26 @@ export class NotificationService {
     switch (notifyType) {
       case NotificationTypeEnum.System: {
         const { baseId, tableId } = urlMeta || {};
-        return `/base/${baseId}/${tableId}`;
+        return `/base/${baseId}/table/${tableId}`;
       }
       case NotificationTypeEnum.Comment: {
         const { baseId, tableId, recordId, commentId } = urlMeta || {};
 
-        return `/base/${baseId}/${tableId}${`?recordId=${recordId}&commentId=${commentId}`}`;
+        return `/base/${baseId}/table/${tableId}${`?recordId=${recordId}&commentId=${commentId}`}`;
       }
       case NotificationTypeEnum.CollaboratorCellTag:
       case NotificationTypeEnum.CollaboratorMultiRowTag: {
         const { baseId, tableId, recordId } = urlMeta || {};
 
-        return `/base/${baseId}/${tableId}${recordId ? `?recordId=${recordId}` : ''}`;
+        return `/base/${baseId}/table/${tableId}${recordId ? `?recordId=${recordId}` : ''}`;
       }
+      case NotificationTypeEnum.ExportBase: {
+        const { downloadUrl } = urlMeta || {};
+        return downloadUrl as string;
+      }
+      case NotificationTypeEnum.AdminNotice:
+      case NotificationTypeEnum.CollaboratorInvite:
+        return '';
       default:
         throw assertNever(notifyType);
     }
@@ -417,13 +759,6 @@ export class NotificationService {
         error && this.logger.error(error);
         resolve(data);
       });
-    });
-  }
-
-  private async sendNotifyByMail(to: string, emailOptions: ISendMailOptions) {
-    await this.mailSenderService.sendMail({
-      to,
-      ...emailOptions,
     });
   }
 }

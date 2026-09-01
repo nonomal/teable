@@ -1,10 +1,11 @@
 import type { INestApplication } from '@nestjs/common';
-import type { ICommentVo } from '@teable/openapi';
+import type { ICommentContent, ICommentVo } from '@teable/openapi';
 import {
   createComment,
   CommentNodeType,
   getCommentList,
   updateComment,
+  deleteComment,
   getCommentDetail,
   createCommentReaction,
   deleteCommentReaction,
@@ -23,6 +24,23 @@ describe('OpenAPI CommentController (e2e)', () => {
   let recordId: string;
   let comments: ICommentVo[] = [];
 
+  const commentContent = (value: string): ICommentContent => [
+    {
+      type: CommentNodeType.Paragraph,
+      children: [{ type: CommentNodeType.Text, value }],
+    },
+  ];
+
+  const expectNotFound = async (request: () => Promise<unknown>) => {
+    let error: { status?: number } | undefined;
+    try {
+      await request();
+    } catch (e) {
+      error = e as { status?: number };
+    }
+    expect(error?.status).toBe(404);
+  };
+
   beforeAll(async () => {
     const appCtx = await initApp();
     app = appCtx.app;
@@ -40,12 +58,7 @@ describe('OpenAPI CommentController (e2e)', () => {
     const commentList = [];
     for (let i = 0; i < 20; i++) {
       const result = await createComment(tableId, recordId, {
-        content: [
-          {
-            type: CommentNodeType.Paragraph,
-            children: [{ type: CommentNodeType.Text, value: `${i}` }],
-          },
-        ],
+        content: commentContent(`${i}`),
         quoteId: null,
       });
       commentList.push(result.data);
@@ -56,15 +69,10 @@ describe('OpenAPI CommentController (e2e)', () => {
     await deleteTable(baseId, tableId);
   });
 
-  it('should achieve the whole comment curd flow', async () => {
+  it('should achieve the whole comment crud flow', async () => {
     // create comment
     const createRes = await createComment(tableId, recordId, {
-      content: [
-        {
-          type: CommentNodeType.Paragraph,
-          children: [{ type: CommentNodeType.Text, value: 'hello world' }],
-        },
-      ],
+      content: commentContent('hello world'),
       quoteId: null,
     });
 
@@ -79,12 +87,7 @@ describe('OpenAPI CommentController (e2e)', () => {
 
     // update comment
     await updateComment(tableId, recordId, commentId, {
-      content: [
-        {
-          type: CommentNodeType.Paragraph,
-          children: [{ type: CommentNodeType.Text, value: 'Good night, Paris.' }],
-        },
-      ],
+      content: commentContent('Good night, Paris.'),
     });
 
     const updatedResult = await getCommentDetail(tableId, recordId, createRes.data.id);
@@ -103,6 +106,7 @@ describe('OpenAPI CommentController (e2e)', () => {
 
     const createdReactionResult = await getCommentDetail(tableId, recordId, createRes.data.id);
     expect(createdReactionResult?.data?.reaction?.[0]?.reaction).toEqual(EmojiSymbol.eyes);
+    expect(createdReactionResult?.data?.reaction?.[0]?.user?.[0]?.id).toEqual(userId);
 
     // delete reaction
     await deleteCommentReaction(tableId, recordId, createRes.data.id, {
@@ -111,6 +115,107 @@ describe('OpenAPI CommentController (e2e)', () => {
 
     const deletedReactionResult = await getCommentDetail(tableId, recordId, createRes.data.id);
     expect(deletedReactionResult?.data?.reaction).toBeNull();
+  });
+
+  describe('comment resource isolation', () => {
+    let otherTableId: string;
+    let otherRecordId: string;
+
+    beforeEach(async () => {
+      const { id, records } = await createTable(baseId, { name: 'other table' });
+      otherTableId = id;
+      otherRecordId = records[0].id;
+    });
+
+    afterEach(async () => {
+      await deleteTable(baseId, otherTableId);
+    });
+
+    it('should not return comment detail through a mismatched table and record path', async () => {
+      const createRes = await createComment(tableId, recordId, {
+        content: commentContent('source comment'),
+        quoteId: null,
+      });
+
+      const mismatchedResult = await getCommentDetail(
+        otherTableId,
+        otherRecordId,
+        createRes.data.id
+      );
+
+      expect(mismatchedResult.data || null).toBeNull();
+    });
+
+    it('should not update or delete a comment through a mismatched table and record path', async () => {
+      const createRes = await createComment(tableId, recordId, {
+        content: commentContent('owner mutation source'),
+        quoteId: null,
+      });
+
+      await expectNotFound(() =>
+        updateComment(otherTableId, otherRecordId, createRes.data.id, {
+          content: commentContent('mismatched update'),
+        })
+      );
+
+      const afterUpdate = await getCommentDetail(tableId, recordId, createRes.data.id);
+      expect(afterUpdate.data?.content).toEqual(commentContent('owner mutation source'));
+
+      await expectNotFound(() => deleteComment(otherTableId, otherRecordId, createRes.data.id));
+
+      const afterDelete = await getCommentDetail(tableId, recordId, createRes.data.id);
+      expect(afterDelete.data?.id).toBe(createRes.data.id);
+    });
+
+    it('should not create or delete reactions through a mismatched table and record path', async () => {
+      const createRes = await createComment(tableId, recordId, {
+        content: commentContent('reaction source'),
+        quoteId: null,
+      });
+
+      await expectNotFound(() =>
+        createCommentReaction(otherTableId, otherRecordId, createRes.data.id, {
+          reaction: EmojiSymbol.eyes,
+        })
+      );
+
+      const afterMismatchedCreate = await getCommentDetail(tableId, recordId, createRes.data.id);
+      expect(afterMismatchedCreate.data?.reaction).toBeNull();
+
+      await createCommentReaction(tableId, recordId, createRes.data.id, {
+        reaction: EmojiSymbol.eyes,
+      });
+
+      await expectNotFound(() =>
+        deleteCommentReaction(otherTableId, otherRecordId, createRes.data.id, {
+          reaction: EmojiSymbol.eyes,
+        })
+      );
+
+      const afterMismatchedDelete = await getCommentDetail(tableId, recordId, createRes.data.id);
+      expect(afterMismatchedDelete.data?.reaction?.[0]?.reaction).toEqual(EmojiSymbol.eyes);
+      expect(afterMismatchedDelete.data?.reaction?.[0]?.user?.[0]?.id).toEqual(userId);
+    });
+
+    it('should not create a comment with a quoteId from another table and record', async () => {
+      const createRes = await createComment(tableId, recordId, {
+        content: commentContent('quote source'),
+        quoteId: null,
+      });
+
+      await expectNotFound(() =>
+        createComment(otherTableId, otherRecordId, {
+          content: commentContent('mismatched quote'),
+          quoteId: createRes.data.id,
+        })
+      );
+
+      const otherComments = await getCommentList(otherTableId, otherRecordId, {
+        cursor: null,
+        take: 10,
+      });
+      expect(otherComments.data.comments).toHaveLength(0);
+    });
   });
 
   describe('get comment list with cursor', async () => {
@@ -165,6 +270,61 @@ describe('OpenAPI CommentController (e2e)', () => {
         comments.slice(1, 11).map((com) => com.id)
       );
       expect(result.data.nextCursor).toBe(comments[11].id);
+    });
+
+    it('should get comment list with mention user and image', async () => {
+      await createComment(tableId, recordId, {
+        content: [
+          {
+            type: CommentNodeType.Paragraph,
+            children: [
+              { type: CommentNodeType.Text, value: 'hello' },
+              {
+                type: CommentNodeType.Mention,
+                value: userId,
+                name: 'a',
+                avatar: 'b',
+              },
+            ],
+          },
+          {
+            type: CommentNodeType.Img,
+            path: 'comment/xxxxxx',
+            url: 'c',
+          },
+        ],
+        quoteId: null,
+      });
+
+      const result = await getCommentList(tableId, recordId, {
+        cursor: null,
+        take: 1,
+        direction: 'forward',
+      });
+      expect(result.data.comments[0].content).toEqual([
+        {
+          type: CommentNodeType.Paragraph,
+          children: [
+            { type: CommentNodeType.Text, value: 'hello' },
+            {
+              type: CommentNodeType.Mention,
+              value: userId,
+              name: globalThis.testConfig.userName,
+              avatar: expect.any(String),
+            },
+          ],
+        },
+        {
+          type: CommentNodeType.Img,
+          path: 'comment/xxxxxx',
+          url: expect.any(String),
+        },
+      ]);
+      expect(result.data.comments[0].createdBy).toEqual({
+        id: userId,
+        name: globalThis.testConfig.userName,
+        avatar: expect.any(String),
+      });
     });
   });
 

@@ -1,14 +1,11 @@
 import { z } from 'zod';
 import type { FieldType, CellValueType } from '../constant';
 import { FieldCore } from '../field';
-import { singleLineTextShowAsSchema } from '../show-as';
-
-export const singlelineTextFieldOptionsSchema = z.object({
-  showAs: singleLineTextShowAsSchema.optional(),
-  defaultValue: z.string().optional(),
-});
-
-export type ISingleLineTextFieldOptions = z.infer<typeof singlelineTextFieldOptionsSchema>;
+import type { IFieldVisitor } from '../field-visitor.interface';
+import {
+  singlelineTextFieldOptionsSchema,
+  type ISingleLineTextFieldOptions,
+} from './single-line-text-option.schema';
 
 export const singleLineTextCelValueSchema = z.string();
 
@@ -18,6 +15,8 @@ export class SingleLineTextFieldCore extends FieldCore {
   type!: FieldType.SingleLineText;
 
   options!: ISingleLineTextFieldOptions;
+
+  meta?: undefined;
 
   cellValueType!: CellValueType.String;
 
@@ -41,12 +40,15 @@ export class SingleLineTextFieldCore extends FieldCore {
       return null;
     }
 
-    if (value === '' || value == null) {
+    // value may be the null
+    // eslint-disable-next-line regexp/prefer-character-class
+    const realValue = value?.replace(/[\n\r\t]/g, ' ')?.trim() ?? null;
+
+    if (realValue === '' || realValue == null) {
       return null;
     }
 
-    // eslint-disable-next-line regexp/prefer-character-class
-    return value.replace(/\n|\r|\t/g, ' ');
+    return realValue;
   }
 
   repair(value: unknown) {
@@ -68,6 +70,14 @@ export class SingleLineTextFieldCore extends FieldCore {
     if (this.isMultipleCellValue) {
       return z.array(singleLineTextCelValueSchema).nonempty().nullable().safeParse(value);
     }
-    return singleLineTextCelValueSchema.nullable().safeParse(value);
+    return z
+      .string()
+      .transform((val) => (val === '' ? null : val))
+      .nullable()
+      .safeParse(value);
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitSingleLineTextField(this);
   }
 }

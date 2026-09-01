@@ -2,7 +2,7 @@ import type { IFilter, IFilterItem } from '@teable/core';
 import { CellValueType, FieldType } from '@teable/core';
 import type { IFieldInstance } from '../../../model';
 import type { IConditionItemProperty } from '../types';
-import { EMPTY_OPERATORS, ARRAY_OPERATORS } from './constant';
+import { EMPTY_OPERATORS, ARRAY_OPERATORS, LINK_TEXT_OPERATORS } from './constant';
 import { isFilterItem } from './type-guard';
 import type { IViewFilterConditionItem, IBaseViewFilter } from './types';
 
@@ -66,11 +66,20 @@ export const baseFilter2ViewFilter = <T extends IConditionItemProperty = IViewFi
 /**
  * 1. when the operator type change to empty, the value should be null
  * 2. when the operator type change and the cellValueType changed, the value should be null
+ * 3. link `contains` / `doesNotContain` take a title string; other link operators take record ids
  */
-export const shouldResetFieldValue = (newOperator: string, oldOperator: string): boolean => {
+export const shouldResetFieldValue = (
+  newOperator: string,
+  oldOperator: string,
+  field?: { type: FieldType }
+): boolean => {
   const getOperatorType = (operator: string) => {
     if (EMPTY_OPERATORS.includes(operator)) {
       return 'empty';
+    }
+
+    if (field?.type === FieldType.Link && LINK_TEXT_OPERATORS.includes(operator)) {
+      return 'text';
     }
 
     if (ARRAY_OPERATORS.includes(operator)) {
@@ -103,7 +112,25 @@ export const shouldFilterByDefaultValue = (
   const { type, cellValueType } = field;
   return (
     type === FieldType.Checkbox ||
-    (type === FieldType.Formula && cellValueType === CellValueType.Boolean)
+    ((type === FieldType.Formula || type === FieldType.ConditionalRollup) &&
+      cellValueType === CellValueType.Boolean)
+  );
+};
+
+/**
+ * Whether a filter item's value is considered "effective" — i.e. the user has
+ * actually filled in a meaningful value, or the field treats null as a valid
+ * default (Checkbox "unchecked", Boolean Formula/Rollup).
+ */
+export const isFilterItemEffective = (
+  item: { value: unknown; operator: string },
+  field: { type: FieldType; cellValueType: CellValueType } | undefined
+): boolean => {
+  return !!(
+    item.value === 0 ||
+    item.value ||
+    EMPTY_OPERATORS.includes(item.operator) ||
+    shouldFilterByDefaultValue(field)
   );
 };
 
@@ -115,14 +142,8 @@ export const getFilterFieldIds = (
 
   filter.forEach((item) => {
     if (isFilterItem(item)) {
-      // The checkbox field and the formula field, when the cellValueType is Boolean, have a default value of null, but they can still work
       const field = fieldMap[item.fieldId];
-      if (
-        item.value === 0 ||
-        item.value ||
-        EMPTY_OPERATORS.includes(item.operator) ||
-        shouldFilterByDefaultValue(field)
-      ) {
+      if (isFilterItemEffective(item, field)) {
         filterIds.add(item.fieldId);
       }
     } else {

@@ -5,14 +5,21 @@ export type IInstanceAction<T> =
   | { type: 'ready'; results: Doc<T>[]; extra: unknown }
   | { type: 'insert'; docs: Doc<T>[]; index: number }
   | { type: 'remove'; docs: Doc<T>[]; index: number }
+  | { type: 'removeByIds'; ids: string[] }
   | { type: 'move'; docs: Doc<T>[]; from: number; to: number }
   | { type: 'clear' }
+  | { type: 'reset' }
+  | { type: 'seed'; data: T[] }
   | { type: 'extra'; extra: unknown };
 
 export interface IInstanceState<R> {
   instances: R[];
   extra: unknown;
 }
+
+const hasDocData = <T>(doc: Doc<T>): doc is Doc<T> & { data: T } => {
+  return doc.data != null;
+};
 
 export function instanceReducer<T, R extends { id: string }>(
   state: IInstanceState<R>,
@@ -21,6 +28,10 @@ export function instanceReducer<T, R extends { id: string }>(
 ): IInstanceState<R> {
   switch (action.type) {
     case 'update': {
+      if (!hasDocData(action.doc)) {
+        return state;
+      }
+
       return {
         ...state,
         instances: state.instances.map((instance) => {
@@ -34,7 +45,7 @@ export function instanceReducer<T, R extends { id: string }>(
     case 'ready':
       return {
         ...state,
-        instances: action.results.map((r) => factory(r.data, r)),
+        instances: action.results.filter(hasDocData).map((r) => factory(r.data, r)),
         extra: action.extra,
       };
     case 'insert':
@@ -42,7 +53,7 @@ export function instanceReducer<T, R extends { id: string }>(
         ...state,
         instances: [
           ...state.instances.slice(0, action.index),
-          ...action.docs.map((doc) => factory(doc.data, doc)),
+          ...action.docs.filter(hasDocData).map((doc) => factory(doc.data, doc)),
           ...state.instances.slice(action.index),
         ],
       };
@@ -53,8 +64,14 @@ export function instanceReducer<T, R extends { id: string }>(
           ...state.instances.slice(0, action.index),
           ...state.instances.slice(action.index + action.docs.length),
         ],
-        extra: undefined,
       };
+    case 'removeByIds': {
+      const deletedIds = new Set(action.ids);
+      return {
+        ...state,
+        instances: state.instances.filter((instance) => !deletedIds.has(instance.id)),
+      };
+    }
     case 'move': {
       const { docs, from, to } = action;
       const newInstances = [...state.instances];
@@ -75,6 +92,31 @@ export function instanceReducer<T, R extends { id: string }>(
         };
       }
       return state;
+    }
+    case 'reset': {
+      // unconditional wipe — unlike 'clear' this also drops doc-less seeded
+      // instances; used on scope changes where any previous data (seeded or
+      // doc-backed) belongs to another collection/query and must not leak
+      if (!state.instances.length && state.extra === undefined) {
+        return state;
+      }
+      return {
+        ...state,
+        instances: [],
+        extra: undefined,
+      };
+    }
+    case 'seed': {
+      // seed data (REST-fetched bootstrap, no doc backing) must never clobber
+      // live doc-backed instances — the subscription is the source of truth
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (state.instances[0] && (state.instances[0] as any).doc) {
+        return state;
+      }
+      return {
+        ...state,
+        instances: action.data.map((data) => factory(data)),
+      };
     }
     case 'extra': {
       return {

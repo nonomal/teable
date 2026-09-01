@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/naming-convention */
+import { FIELD_RO_PROPERTIES, FieldType } from '@teable/core';
 import type { IFieldVo, IConvertFieldRo } from '@teable/core';
-import { FIELD_RO_PROPERTIES } from '@teable/core';
 import { isEqual, difference } from 'lodash';
 
 export const NON_INFECT_OPTION_KEYS = new Set([
@@ -9,6 +9,9 @@ export const NON_INFECT_OPTION_KEYS = new Set([
   'visibleFieldIds',
   'filterByViewId',
   'filter',
+  'sort',
+  'limit',
+  'defaultValue',
 ]);
 
 export const majorOptionsKeyChanged = (
@@ -18,6 +21,16 @@ export const majorOptionsKeyChanged = (
   const keys = Object.keys(newOptions).filter((key) => !isEqual(oldOptions[key], newOptions[key]));
 
   return keys.some((key) => !NON_INFECT_OPTION_KEYS.has(key));
+};
+
+const buttonOptionsAffectData = (
+  oldOptions: Record<string, unknown>,
+  newOptions: Record<string, unknown>
+) => {
+  const oldWorkflow = oldOptions.workflow as { id?: string } | null | undefined;
+  const newWorkflow = newOptions.workflow as { id?: string } | null | undefined;
+
+  return oldWorkflow?.id !== newWorkflow?.id;
 };
 
 export function majorFieldKeysChanged(oldField: IFieldVo, fieldRo: IConvertFieldRo) {
@@ -34,7 +47,9 @@ export function majorFieldKeysChanged(oldField: IFieldVo, fieldRo: IConvertField
     const oldOptions = (oldField.options as Record<string, unknown>) || {};
     const newOptions = (fieldRo.options as Record<string, unknown>) || {};
 
-    return majorOptionsKeyChanged(oldOptions, newOptions);
+    return oldField.type === FieldType.Button
+      ? buttonOptionsAffectData(oldOptions, newOptions)
+      : majorOptionsKeyChanged(oldOptions, newOptions);
   }
 
   return true;

@@ -1,18 +1,18 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-import type { IUserCellValue, ILinkCellValue, IOperator } from '@teable/core';
+import type { IUserCellValue, ILinkCellValue, IOperator, IDatetimeFormatting } from '@teable/core';
 import {
   FieldType,
   isNot,
   is,
   isNotEmpty,
-  exactDate,
-  hasNoneOf,
+  isNotExactly,
   CellValueType,
+  exactFormatDate,
 } from '@teable/core';
-import { zonedTimeToUtc } from 'date-fns-tz';
 import type { IFieldInstance } from '../features/field/model/factory';
 
 const SPECIAL_OPERATOR_FIELD_TYPE_SET = new Set([
+  FieldType.SingleSelect,
   FieldType.MultipleSelect,
   FieldType.User,
   FieldType.CreatedBy,
@@ -49,24 +49,30 @@ export const cellValue2FilterValue = (cellValue: unknown, field: IFieldInstance)
 
 export const generateFilterItem = (field: IFieldInstance, value: unknown) => {
   let operator: IOperator = isNot.value;
-  const { id: fieldId, type, isMultipleCellValue, options } = field;
+  const { id: fieldId, type, isMultipleCellValue, options, cellValueType } = field;
 
   if (shouldFilterByDefaultValue(field)) {
     operator = is.value;
     value = !value || null;
   } else if (value == null) {
     operator = isNotEmpty.value;
-  } else if (type === FieldType.Date) {
+  } else if (
+    type === FieldType.Date ||
+    (type === FieldType.Formula && cellValueType === CellValueType.DateTime)
+  ) {
     const timeZone =
-      options?.formatting?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const dateStr = zonedTimeToUtc(value as string, timeZone).toISOString();
+      (options?.formatting as IDatetimeFormatting)?.timeZone ??
+      Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // Group keys are already absolute instants (ISO with offset); re-zoning them
+    // would shift by the server process timezone and exclude the wrong day.
+    const dateStr = new Date(value as string).toISOString();
     value = {
       exactDate: dateStr,
-      mode: exactDate.value,
+      mode: exactFormatDate.value,
       timeZone,
     };
   } else if (SPECIAL_OPERATOR_FIELD_TYPE_SET.has(type) && isMultipleCellValue) {
-    operator = hasNoneOf.value;
+    operator = isNotExactly.value;
   }
 
   return {

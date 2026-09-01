@@ -1,6 +1,8 @@
 /* eslint-disable sonarjs/no-duplicate-string */
+import type { INestApplication } from '@nestjs/common';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { WsAdapter } from '@nestjs/platform-ws';
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
@@ -14,8 +16,11 @@ import type {
   IViewVo,
   IFilterRo,
   IViewRo,
+  IConditionalRollupFieldOptions,
+  IFilter,
+  IUpdateFieldRo,
 } from '@teable/core';
-import { FieldKeyType } from '@teable/core';
+import { FieldKeyType, FieldType } from '@teable/core';
 import type {
   ICreateRecordsRo,
   ICreateRecordsVo,
@@ -26,6 +31,7 @@ import type {
   ITableFullVo,
   ICreateSpaceRo,
   ICreateBaseRo,
+  IRecordInsertOrderRo,
 } from '@teable/openapi';
 import {
   axios,
@@ -37,8 +43,10 @@ import {
   getRecords as apiGetRecords,
   createRecords as apiCreateRecords,
   createField as apiCreateField,
+  updateField as apiUpdateField,
   deleteField as apiDeleteField,
   convertField as apiConvertField,
+  duplicateRecord as apiDuplicateRecord,
   getFields as apiGetFields,
   getField as apiGetField,
   getViewList as apiGetViewList,
@@ -58,22 +66,50 @@ import {
   permanentDeleteBase as apiPermanentDeleteBase,
 } from '@teable/openapi';
 import { json, urlencoded } from 'express';
+import { ClsService } from 'nestjs-cls';
 import { AppModule } from '../../src/app.module';
 import type { IBaseConfig } from '../../src/configs/base.config';
 import { baseConfig } from '../../src/configs/base.config';
 import { SessionHandleService } from '../../src/features/auth/session/session-handle.service';
+import { BaseSqlExecutorModule } from '../../src/features/base-sql-executor/base-sql-executor.module';
+import { FieldOpenApiV2Service } from '../../src/features/field/open-api/field-open-api-v2.service';
 import { NextService } from '../../src/features/next/next.service';
+import { TableIndexService } from '../../src/features/table/table-index.service';
 import { GlobalExceptionFilter } from '../../src/filter/global-exception.filter';
+import type { IClsStore } from '../../src/types/cls';
 import { WsGateway } from '../../src/ws/ws.gateway';
 import { DevWsGateway } from '../../src/ws/ws.gateway.dev';
+import { acquireApp, getSharedBundle } from './e2e-shared';
 import { TestingLogger } from './testing-logger';
 
 export async function initApp() {
   // eslint-disable-next-line @typescript-eslint/no-misused-promises
   if (globalThis.initApp) return await globalThis.initApp();
 
+  const cacheKey = 'community:default';
+  // Private apps (env customized by the spec, or sharing disabled) keep a real
+  // close() that also restores the axios singleton to this worker's shared app.
+  return acquireApp(
+    cacheKey,
+    bootApp,
+    ({ cookieInterceptorId }) => {
+      axios.interceptors.request.eject(cookieInterceptorId);
+      const shared = getSharedBundle(cacheKey);
+      if (shared) {
+        axios.defaults.baseURL = shared.appUrl + '/api';
+      }
+    },
+    axios
+  );
+}
+
+async function bootApp() {
+  if (process.env.E2E_PROBE) {
+    // eslint-disable-next-line no-console
+    console.log(`[e2e-probe] BOOT community pool=${process.env.VITEST_POOL_ID}`);
+  }
   const moduleFixture: TestingModule = await Test.createTestingModule({
-    imports: [AppModule],
+    imports: [AppModule, BaseSqlExecutorModule],
   })
     .overrideProvider(NextService)
     .useValue({
@@ -81,6 +117,12 @@ export async function initApp() {
         return;
       },
     })
+    // EventEmitterModule.forRoot() is evaluated once per process, so every test
+    // app would otherwise share one EventEmitter2: closing any app wipes all
+    // listeners (onApplicationShutdown -> removeAllListeners) and events double
+    // fire across coexisting apps. Give each app its own emitter.
+    .overrideProvider(EventEmitter2)
+    .useValue(new EventEmitter2({ wildcard: true, delimiter: '.' }))
     .overrideProvider(DevWsGateway)
     .useClass(WsGateway)
     .compile();
@@ -91,7 +133,9 @@ export async function initApp() {
 
   const configService = app.get(ConfigService);
 
-  app.useGlobalFilters(new GlobalExceptionFilter(configService));
+  app.useGlobalFilters(
+    new GlobalExceptionFilter(configService, app.get<ClsService<IClsStore>>(ClsService))
+  );
   app.useWebSocketAdapter(new WsAdapter(app));
   app.useGlobalPipes(
     new ValidationPipe({ transform: true, stopAtFirstError: true, forbidUnknownValues: false })
@@ -114,33 +158,87 @@ export async function initApp() {
 
   axios.defaults.baseURL = url + '/api';
 
-  const cookie = (
-    await getCookie(globalThis.testConfig.email, globalThis.testConfig.password)
-  ).cookie.join(';');
+  const sessionHandleService = app.get<SessionHandleService>(SessionHandleService);
+  const createSession = async () => {
+    const cookie = (
+      await getCookie(globalThis.testConfig.email, globalThis.testConfig.password)
+    ).cookie.join(';');
+    const sessionID = await sessionHandleService.getSessionIdFromRequest({
+      headers: { cookie },
+      url: `${url}/socket`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    return { cookie, sessionID };
+  };
+  const session = await createSession();
 
-  axios.interceptors.request.use((config) => {
-    config.headers.Cookie = cookie;
+  const cookieInterceptorId = axios.interceptors.request.use((config) => {
+    // Never attach the shared session to signin/signup: passport regenerates the
+    // session attached to a login request, which would destroy this cookie's sid
+    // and break every later spec file sharing the app.
+    if (!/\/auth\/(?:signin|signup)\b/.test(config.url ?? '')) {
+      config.headers.Cookie = session.cookie;
+    }
     return config;
   });
 
   const now = new Date();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   console.log(`> Test NODE_ENV is ${process.env.NODE_ENV}`);
+  console.log(`> Test V2_COMPUTED_UPDATE_MODE is ${process.env.V2_COMPUTED_UPDATE_MODE}`);
+  console.log(`> Test FORCE_V2_ALL is ${process.env.FORCE_V2_ALL}`);
   console.log(`> Test Ready on ${url}`);
   console.log('> Test System Time Zone:', timeZone);
   console.log('> Test Current System Time:', now.toString());
 
-  const sessionHandleService = app.get<SessionHandleService>(SessionHandleService);
-  return {
+  const bundle = {
     app,
     appUrl: url,
-    cookie,
-    sessionID: await sessionHandleService.getSessionIdFromRequest({
-      headers: { cookie },
-      url: `${url}/socket`,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any),
+    ...session,
   };
+  const refreshSession = async () => {
+    const userId = await sessionHandleService.getUserId(session.sessionID);
+    if (userId !== globalThis.testConfig.userId) {
+      Object.assign(session, await createSession());
+    }
+    return session;
+  };
+  return { bundle, cookieInterceptorId, refreshSession };
+}
+
+/**
+ * Helper function to run code within CLS context with test user
+ */
+export async function runWithTestUser<T>(
+  clsService: ClsService<IClsStore>,
+  fn: () => Promise<T>,
+  userOverrides?: Partial<IClsStore['user']>
+): Promise<T> {
+  const testUser: IClsStore['user'] = {
+    id: globalThis.testConfig.userId,
+    name: globalThis.testConfig.userName,
+    email: globalThis.testConfig.email,
+    isAdmin: false,
+    ...userOverrides,
+  };
+
+  const clsStore: IClsStore = {
+    user: testUser,
+    origin: {
+      ip: '127.0.0.1',
+      byApi: false,
+      userAgent: 'test-agent',
+      referer: '',
+    },
+    tx: {},
+    permissions: [],
+  };
+
+  return clsService.runWith(clsStore, fn);
+}
+
+export async function getTableIndexService(app: INestApplication) {
+  return app.get<TableIndexService>(TableIndexService);
 }
 
 export async function createTable(baseId: string, tableVo: ICreateTableRo, expectStatus = 201) {
@@ -293,9 +391,14 @@ export async function getRecord(
   expectStatus = 200
 ): Promise<IRecord> {
   try {
-    const res = await apiGetRecord(tableId, recordId, {
+    const query: { fieldKeyType: FieldKeyType; cellFormat?: CellFormat } = {
       fieldKeyType: FieldKeyType.Id,
-      cellFormat,
+    };
+    if (cellFormat) {
+      query.cellFormat = cellFormat;
+    }
+    const res = await apiGetRecord(tableId, recordId, {
+      ...query,
     });
 
     expect(res.status).toEqual(expectStatus);
@@ -312,6 +415,25 @@ export async function getRecords(tableId: string, query?: IGetRecordsRo): Promis
   const result = await apiGetRecords(tableId, query);
 
   return result.data;
+}
+
+export async function duplicateRecord(
+  tableId: string,
+  recordId: string,
+  order: IRecordInsertOrderRo,
+  expectStatus = 201
+) {
+  try {
+    const res = await apiDuplicateRecord(tableId, recordId, order);
+
+    expect(res.status).toEqual(expectStatus);
+    return res.data;
+  } catch (e: unknown) {
+    if ((e as HttpError).status !== expectStatus) {
+      throw e;
+    }
+    return {} as IRecord;
+  }
 }
 
 export async function createRecords(
@@ -337,13 +459,61 @@ export async function createRecords(
   }
 }
 
+const createDefaultConditionalRollupFilter = (fieldId: string): IFilter => ({
+  conjunction: 'and',
+  filterSet: [
+    {
+      fieldId,
+      operator: 'isNotEmpty',
+      value: null,
+    },
+  ],
+});
+
+const ensureConditionalRollupOptions = (fieldRo: IFieldRo): IFieldRo => {
+  if (fieldRo.type !== FieldType.ConditionalRollup) {
+    return fieldRo;
+  }
+
+  const options = fieldRo.options as Partial<IConditionalRollupFieldOptions> | undefined;
+  if (!options?.lookupFieldId) {
+    return fieldRo;
+  }
+
+  if (options.filter === null) {
+    return {
+      ...fieldRo,
+      options: {
+        ...options,
+        filter: undefined,
+      } as IConditionalRollupFieldOptions,
+    };
+  }
+
+  const hasFilterConditions =
+    options.filter?.filterSet != null && options.filter.filterSet.length > 0;
+
+  if (hasFilterConditions) {
+    return fieldRo;
+  }
+
+  return {
+    ...fieldRo,
+    options: {
+      ...options,
+      filter: createDefaultConditionalRollupFilter(options.lookupFieldId),
+    } as IConditionalRollupFieldOptions,
+  };
+};
+
 export async function createField(
   tableId: string,
   fieldRo: IFieldRo,
   expectStatus = 201
 ): Promise<IFieldVo> {
   try {
-    const res = await apiCreateField(tableId, fieldRo);
+    const normalizedField = ensureConditionalRollupOptions(fieldRo);
+    const res = await apiCreateField(tableId, normalizedField);
 
     expect(res.status).toEqual(expectStatus);
     return res.data;
@@ -353,6 +523,39 @@ export async function createField(
     }
     return {} as IFieldVo;
   }
+}
+
+export async function updateField(
+  tableId: string,
+  fieldId: string,
+  fieldRo: IUpdateFieldRo,
+  expectStatus = 200
+): Promise<IFieldVo> {
+  try {
+    const res = await apiUpdateField(tableId, fieldId, fieldRo);
+
+    expect(res.status).toEqual(expectStatus);
+    return res.data;
+  } catch (e: unknown) {
+    if ((e as HttpError).status !== expectStatus) {
+      throw e;
+    }
+    return {} as IFieldVo;
+  }
+}
+
+export async function createFields(
+  tableId: string,
+  fieldRos: IFieldRo[],
+  appInstance?: INestApplication
+): Promise<IFieldVo[]> {
+  const normalizedFields = fieldRos.map((field) => ensureConditionalRollupOptions(field));
+  const app = appInstance ?? (await initApp()).app;
+  const fieldOpenApiV2Service = app.get(FieldOpenApiV2Service);
+  const clsService = (fieldOpenApiV2Service as unknown as { cls: ClsService<IClsStore> }).cls;
+  return await runWithTestUser(clsService, async () =>
+    fieldOpenApiV2Service.createFields(tableId, normalizedFields)
+  );
 }
 
 export async function deleteField(tableId: string, fieldId: string) {
@@ -373,7 +576,8 @@ export async function convertField(
   expectStatus = 200
 ): Promise<IFieldVo> {
   try {
-    const res = await apiConvertField(tableId, fieldId, fieldRo);
+    const normalizedField = ensureConditionalRollupOptions(fieldRo);
+    const res = await apiConvertField(tableId, fieldId, normalizedField);
 
     expect(res.status).toEqual(expectStatus);
     return res.data;
@@ -388,9 +592,10 @@ export async function convertField(
 export async function getFields(
   tableId: string,
   viewId?: string,
-  filterHidden?: boolean
+  filterHidden?: boolean,
+  projection?: string[]
 ): Promise<IFieldVo[]> {
-  const result = await apiGetFields(tableId, { viewId, filterHidden });
+  const result = await apiGetFields(tableId, { viewId, filterHidden, projection });
 
   return result.data;
 }

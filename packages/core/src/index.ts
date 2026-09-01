@@ -6,6 +6,8 @@ extend(utc);
 extend(timezone);
 
 export * from './types';
+export * from './affiliate';
+export * from './attribution';
 export * from './array';
 export * from './asserts';
 export * from './convert';

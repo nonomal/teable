@@ -1,7 +1,9 @@
-import { ColorUtils } from '@teable/core';
+import { useTheme } from '@teable/next-themes';
 import { cn } from '@teable/ui-lib';
 import { useMemo } from 'react';
+import { useTranslation } from '../../../../context/app/i18n';
 import type { SingleSelectField } from '../../../../model';
+import { getSelectColorPairs } from '../../../../utils/select-color';
 import type { IColorOption } from './base';
 import { BaseSingleSelect } from './base';
 import { DefaultErrorLabel } from './DefaultErrorLabel';
@@ -13,13 +15,16 @@ interface ISingleSelect {
   field: SingleSelectField;
   className?: string;
   popoverClassName?: string;
+  modal?: boolean;
 }
 
 function FilterSingleSelect(props: ISingleSelect) {
-  const { onSelect, field, value, className, popoverClassName } = props;
+  const { t } = useTranslation();
+  const { onSelect, field, value, className, popoverClassName, modal } = props;
+  const { resolvedTheme } = useTheme();
 
   const options = useMemo<IColorOption[]>(() => {
-    return field?.options?.choices.map((choice) => ({
+    return (field?.options?.choices ?? []).map((choice) => ({
       value: choice.name,
       label: choice.name,
       color: choice.color,
@@ -28,31 +33,35 @@ function FilterSingleSelect(props: ISingleSelect) {
 
   const optionRender = (option: IColorOption) => {
     const { color, label, value } = option;
+    const colorPair = getSelectColorPairs(color, resolvedTheme);
     return (
       <div
         key={value}
-        className="truncate rounded-lg px-2"
+        className="flex h-5 w-fit max-w-full items-center overflow-hidden rounded-full px-2 text-xs"
         style={{
-          backgroundColor: ColorUtils.getHexForColor(color),
-          color: ColorUtils.shouldUseLightTextOnColor(color) ? '#ffffff' : '#000000',
+          backgroundColor: colorPair.backgroundColor,
+          color: colorPair.color,
         }}
+        title={label}
       >
-        {label}
+        <span className="min-w-0 flex-1 truncate">{label}</span>
       </div>
     );
   };
 
   return (
     <BaseSingleSelect
+      drawerTitle={t('filter.selectValue')}
       options={options}
       value={value}
       onSelect={onSelect}
-      className={cn('justify-between', className)}
+      className={cn('justify-between px-2 py-0', className)}
       popoverClassName={cn(popoverClassName)}
       optionRender={optionRender}
       displayRender={optionRender}
       defaultLabel={<DefaultErrorLabel />}
-      placeholderClassName="text-xs"
+      placeholderClassName="text-sm"
+      modal={modal}
     />
   );
 }

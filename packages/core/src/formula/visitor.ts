@@ -1,28 +1,31 @@
+/* eslint-disable sonarjs/cognitive-complexity */
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { AbstractParseTreeVisitor } from 'antlr4ts/tree/AbstractParseTreeVisitor';
-import { CellValueType } from '../models/field/constant';
-import type { FieldCore } from '../models/field/field';
-import type { IRecord } from '../models/record';
-import { FunctionName } from './functions/common';
-import type { FormulaFunc } from './functions/common';
-import { FUNCTIONS } from './functions/factory';
-import { FormulaBaseError } from './functions/logical';
 import type {
   BinaryOpContext,
   BooleanLiteralContext,
   BracketsContext,
   DecimalLiteralContext,
+  FieldReferenceCurlyContext,
   FunctionCallContext,
   IntegerLiteralContext,
   LeftWhitespaceOrCommentsContext,
   RightWhitespaceOrCommentsContext,
   RootContext,
   StringLiteralContext,
-  FieldReferenceCurlyContext,
   UnaryOpContext,
-} from './parser/Formula';
-import type { FormulaVisitor } from './parser/FormulaVisitor';
+  FormulaVisitor,
+} from '@teable/formula';
+import { extractFieldReferenceId } from '@teable/formula';
+import { AbstractParseTreeVisitor } from 'antlr4ts/tree/AbstractParseTreeVisitor';
+import { CellValueType } from '../models/field/constant';
+import type { FieldCore } from '../models/field/field';
+import type { IRecord } from '../models/record';
+import { normalizeFunctionNameAlias } from './function-aliases';
+import { FunctionName } from './functions/common';
+import type { FormulaFunc } from './functions/common';
+import { FUNCTIONS } from './functions/factory';
+import { FormulaBaseError } from './functions/logical';
 import { TypedValue } from './typed-value';
 import { TypedValueConverter } from './typed-value-converter';
 
@@ -242,7 +245,13 @@ export class EvalVisitor
         break;
       }
       case Boolean(ctx.PLUS()): {
-        value = lv + rv;
+        if (valueType === CellValueType.Number) {
+          value = lv + rv;
+        } else {
+          const leftString = lv == null ? '' : lv;
+          const rightString = rv == null ? '' : rv;
+          value = String(leftString) + String(rightString);
+        }
         break;
       }
       case Boolean(ctx.PERCENT()): {
@@ -270,11 +279,11 @@ export class EvalVisitor
         break;
       }
       case Boolean(ctx.EQUAL()): {
-        value = lv == rv;
+        value = this.areValuesEqual(left, right, lv, rv);
         break;
       }
       case Boolean(ctx.BANG_EQUAL()): {
-        value = lv != rv;
+        value = this.areValuesNotEqual(left, right, lv, rv);
         break;
       }
       case Boolean(ctx.AMP()): {
@@ -295,9 +304,151 @@ export class EvalVisitor
     return new TypedValue(value, valueType);
   }
 
+  private areValuesEqual(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    const normalized = this.normalizeEqualityValues(
+      leftTypedValue,
+      rightTypedValue,
+      leftValue,
+      rightValue
+    );
+    if (this.shouldUseStrictBlankEquality(leftTypedValue, rightTypedValue, leftValue, rightValue)) {
+      return normalized.left === normalized.right;
+    }
+    return normalized.left == normalized.right;
+  }
+
+  private areValuesNotEqual(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    const { left: normalizedLeft, right: normalizedRight } = this.normalizeEqualityValues(
+      leftTypedValue,
+      rightTypedValue,
+      leftValue,
+      rightValue
+    );
+
+    if (this.shouldUseStrictBlankEquality(leftTypedValue, rightTypedValue, leftValue, rightValue)) {
+      return normalizedLeft !== normalizedRight;
+    }
+
+    return normalizedLeft != normalizedRight;
+  }
+
+  private shouldUseStrictBlankEquality(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    const hasNumericOperand =
+      this.isNumericLikeTypedValue(leftTypedValue) || this.isNumericLikeTypedValue(rightTypedValue);
+    if (!hasNumericOperand) {
+      return false;
+    }
+    return (
+      this.isBlankEqualityValue(leftTypedValue, leftValue) ||
+      this.isBlankEqualityValue(rightTypedValue, rightValue)
+    );
+  }
+
+  private isBlankEqualityValue(typedValue: TypedValue, value: unknown) {
+    if (typedValue.isBlank || value == null) {
+      return true;
+    }
+    return this.isStringLikeTypedValue(typedValue) && value === '';
+  }
+
+  private normalizeEqualityValues(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    if (!this.shouldNormalizeBlankEquality(leftTypedValue, rightTypedValue)) {
+      return {
+        left: leftValue,
+        right: rightValue,
+      };
+    }
+
+    return {
+      left: this.normalizeBlankEqualityValue(leftTypedValue, leftValue),
+      right: this.normalizeBlankEqualityValue(rightTypedValue, rightValue),
+    };
+  }
+
+  private shouldNormalizeBlankEquality(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue
+  ): boolean {
+    return (
+      this.isStringLikeTypedValue(leftTypedValue) ||
+      this.isStringLikeTypedValue(rightTypedValue) ||
+      this.isNumericLikeTypedValue(leftTypedValue) ||
+      this.isNumericLikeTypedValue(rightTypedValue)
+    );
+  }
+
+  private normalizeBlankEqualityValue(typedValue: TypedValue, value: unknown) {
+    if (value == null && this.isStringLikeTypedValue(typedValue)) {
+      return '';
+    }
+
+    if (value == null && this.isNumericLikeTypedValue(typedValue)) {
+      return '';
+    }
+
+    return value;
+  }
+
+  private isStringLikeTypedValue(typedValue: TypedValue): boolean {
+    if (typedValue.type === CellValueType.String) {
+      return true;
+    }
+
+    if (typedValue.field?.cellValueType === CellValueType.String) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private isNumericLikeTypedValue(typedValue: TypedValue): boolean {
+    if (typedValue.type === CellValueType.Number) {
+      return true;
+    }
+
+    if (typedValue.field?.cellValueType === CellValueType.Number) {
+      return true;
+    }
+
+    return false;
+  }
+
   private createTypedValueByField(field: FieldCore) {
     let value: any = this.record ? this.record.fields[field.id] : null;
-    if (value == null || field.cellValueType !== CellValueType.String) {
+
+    if (field.cellValueType === CellValueType.Number) {
+      return new TypedValue(
+        this.normalizeNumberCellValue(value, field.isMultipleCellValue),
+        field.cellValueType,
+        field.isMultipleCellValue,
+        field
+      );
+    }
+
+    if (
+      value == null ||
+      ![CellValueType.String, CellValueType.DateTime].includes(field.cellValueType)
+    ) {
       return new TypedValue(value, field.cellValueType, field.isMultipleCellValue, field);
     }
 
@@ -312,13 +463,28 @@ export class EvalVisitor
     return new TypedValue(value, field.cellValueType, field.isMultipleCellValue, field);
   }
 
-  visitFieldReferenceCurly(ctx: FieldReferenceCurlyContext) {
-    const fieldId = ctx.field_reference_curly().text;
-    if (fieldId == '') {
-      return new TypedValue('', CellValueType.String);
+  private normalizeNumberCellValue(value: any, isMultiple?: boolean) {
+    const normalize = (cellValue: any) => {
+      if (cellValue == null || cellValue === '') {
+        return null;
+      }
+      return typeof cellValue === 'number' ? cellValue : Number(cellValue);
+    };
+
+    if (isMultiple) {
+      return Array.isArray(value) ? value.map(normalize) : value;
     }
 
-    const field = this.dependencies[fieldId.slice(1, -1)];
+    return normalize(value);
+  }
+
+  visitFieldReferenceCurly(ctx: FieldReferenceCurlyContext) {
+    const fieldId = extractFieldReferenceId(ctx);
+    if (!fieldId) {
+      throw new Error('FieldId {} is a invalid field id');
+    }
+
+    const field = this.dependencies[fieldId];
     if (!field) {
       throw new Error(`FieldId ${fieldId} is a invalid field id`);
     }
@@ -333,10 +499,12 @@ export class EvalVisitor
   }
 
   visitFunctionCall(ctx: FunctionCallContext) {
-    const fnName = ctx.func_name().text.toUpperCase() as FunctionName;
+    const rawName = ctx.func_name().text.toUpperCase();
+    const normalized = normalizeFunctionNameAlias(rawName) as FunctionName;
+    const fnName = normalized;
     const func = FUNCTIONS[fnName];
     if (!func) {
-      throw new TypeError(`Function name ${func} is not found`);
+      throw new TypeError(`Function name ${rawName} is not found`);
     }
 
     if (fnName === FunctionName.Blank) {

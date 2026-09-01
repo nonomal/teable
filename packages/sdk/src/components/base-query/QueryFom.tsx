@@ -12,6 +12,7 @@ import {
 } from '@teable/ui-lib';
 import { useTranslation } from '../../context/app/i18n';
 import { useTables } from '../../hooks';
+import { useContentDir } from '../../hooks/use-content-dir';
 
 export const QueryFrom = (props: {
   onClick?: (type: 'table' | 'source', tableId?: string) => void;
@@ -19,13 +20,14 @@ export const QueryFrom = (props: {
   const tables = useTables();
   const { onClick } = props;
   const { t } = useTranslation();
+  const contentDir = useContentDir();
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button className="text-[13px]" variant="outline" size={'xs'}>
           {t('baseQuery.add')}
-          <Plus />
+          <Plus className="size-4 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-56">
@@ -35,7 +37,7 @@ export const QueryFrom = (props: {
             <DropdownMenuSubContent>
               {tables.map((table) => (
                 <DropdownMenuItem key={table.id} onClick={() => onClick?.('table', table.id)}>
-                  {table.name}
+                  <span dir={contentDir}>{table.name}</span>
                 </DropdownMenuItem>
               ))}
             </DropdownMenuSubContent>

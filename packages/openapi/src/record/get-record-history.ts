@@ -5,19 +5,38 @@ import { userMapVoSchema } from '../trash';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
 
+const recordHistoryArrayQuerySchema = z
+  .union([z.string(), z.string().array()])
+  .transform((val) => (typeof val === 'string' ? [val] : val))
+  .optional()
+  .meta({
+    type: 'array',
+    items: { type: 'string' },
+  });
+
 export const getRecordHistoryQuerySchema = z.object({
   startDate: z.string().optional(),
   endDate: z.string().optional(),
+  fieldIds: recordHistoryArrayQuerySchema,
+  createdByIds: recordHistoryArrayQuerySchema,
   cursor: z.string().nullish(),
 });
 
 export const recordHistoryItemStateVoSchema = z.object({
-  meta: fieldVoSchema.pick({ name: true, type: true, cellValueType: true }).merge(
-    z.object({
-      options: z.unknown(),
+  meta: fieldVoSchema
+    .pick({
+      name: true,
+      type: true,
+      cellValueType: true,
+      isLookup: true,
+      isConditionalLookup: true,
     })
-  ),
+    .extend({
+      options: z.unknown(),
+    }),
   data: z.unknown(),
+  // link cell values whose referenced record no longer exists at read time
+  deletedRecordIds: z.array(z.string()).optional(),
 });
 
 export const recordHistoryItemVoSchema = z.object({
@@ -45,15 +64,37 @@ export type IRecordHistoryVo = z.infer<typeof recordHistoryVoSchema>;
 
 export const GET_RECORD_HISTORY_URL = '/table/{tableId}/record/{recordId}/history';
 
+export const serializeRecordHistoryQuery = (params?: IGetRecordHistoryQuery) => {
+  const searchParams = new URLSearchParams();
+
+  Object.entries(params ?? {}).forEach(([key, value]) => {
+    if (value == null) {
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => searchParams.append(key, item));
+      return;
+    }
+
+    searchParams.append(key, value);
+  });
+
+  return searchParams.toString();
+};
+
 export const GetRecordHistoryRoute: RouteConfig = registerRoute({
   method: 'get',
   path: GET_RECORD_HISTORY_URL,
-  description: 'Get the history list for a record',
+  summary: 'Get record history',
+  description:
+    'Retrieve the change history of a specific record, including field modifications and user information.',
   request: {
     params: z.object({
       tableId: z.string(),
       recordId: z.string(),
     }),
+    query: getRecordHistoryQuerySchema,
   },
   responses: {
     200: {
@@ -78,6 +119,6 @@ export const getRecordHistory = async (
       tableId,
       recordId,
     }),
-    { params: query }
+    { params: query, paramsSerializer: serializeRecordHistoryQuery }
   );
 };

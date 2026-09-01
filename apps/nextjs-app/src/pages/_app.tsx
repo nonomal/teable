@@ -1,5 +1,5 @@
-import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
 import * as Sentry from '@sentry/nextjs';
+import type { IHttpError } from '@teable/core';
 import type { IUser } from '@teable/sdk';
 import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
@@ -9,10 +9,11 @@ import App from 'next/app';
 import Head from 'next/head';
 import { appWithTranslation } from 'next-i18next';
 import { useEffect } from 'react';
-import { z } from 'zod';
 import { Guide } from '@/components/Guide';
-import { MicrosoftClarity, Umami } from '@/components/Metrics';
+import { GoogleAnalytics, MetaPixel, MicrosoftClarity, PostHog, Umami } from '@/components/Metrics';
 import RouterProgressBar from '@/components/RouterProgress';
+import { SideBarScript } from '@/features/app/components/sidebar/SideBarScript';
+import { HttpErrorPage } from '@/features/system/pages';
 import type { IServerEnv } from '@/lib/server-env';
 import type { NextPageWithLayout } from '@/lib/type';
 import { colors } from '@/themes/colors';
@@ -20,9 +21,12 @@ import { getColorsCssVariablesText } from '@/themes/utils';
 import nextI18nextConfig from '../../next-i18next.config.js';
 import { AppProviders } from '../AppProviders';
 import '@glideapps/glide-data-grid/dist/index.css';
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
+import 'reactflow/dist/style.css';
+
 dayjs.extend(utc);
 dayjs.extend(timezone);
-extendZodWithOpenApi(z);
 
 /**
  * Import global styles, global css or polyfills here
@@ -38,7 +42,12 @@ export type AppProps<T> = NextAppProps<T> & {
   err?: Error;
 };
 
-type AppPropsWithLayout = AppProps<{ user?: IUser; env?: IServerEnv; err?: Error }> & {
+type AppPropsWithLayout = AppProps<{
+  user?: IUser;
+  env?: IServerEnv;
+  err?: Error;
+  httpError?: IHttpError;
+}> & {
   Component: NextPageWithLayout;
 };
 
@@ -46,8 +55,9 @@ type AppPropsWithLayout = AppProps<{ user?: IUser; env?: IServerEnv; err?: Error
  * @link https://nextjs.org/docs/advanced-features/custom-app
  */
 const MyApp = (appProps: AppPropsWithLayout) => {
-  const { Component, err, pageProps } = appProps;
-  const { user, env = {}, err: pageErr } = pageProps;
+  const { Component, err: nextJsError, pageProps } = appProps;
+  const { user, env = {}, err: pageError, httpError } = pageProps;
+  const appBuildVersion = env.buildVersion ?? process.env.APP_VERSION ?? 'develop';
   // Use the layout defined at the page level, if available
   const getLayout = Component.getLayout ?? ((page) => page);
   useEffect(() => {
@@ -66,16 +76,32 @@ const MyApp = (appProps: AppPropsWithLayout) => {
         </Head>
         <MicrosoftClarity clarityId={env.microsoftClarityId} user={user} />
         <Umami umamiWebSiteId={env.umamiWebSiteId} umamiUrl={env.umamiUrl} user={user} />
+        <GoogleAnalytics gaId={env.gaId} user={user} />
+        <PostHog
+          posthogKey={env.posthogKey}
+          posthogHost={env.posthogHost}
+          posthogWebHost={env.posthogWebHost}
+          posthogUiHost={env.posthogUiHost}
+          user={user}
+        />
+        <MetaPixel metaPixelId={env.metaPixelId} />
+        <SideBarScript />
         <script
           dangerouslySetInnerHTML={{
             __html: `
-              window.version="${process.env.NEXT_PUBLIC_BUILD_VERSION ?? 'develop'}";
+              window.version=${JSON.stringify(appBuildVersion)};
               window.__TE__=${JSON.stringify(env)};
             `,
           }}
         />
         {/* Workaround for https://github.com/vercel/next.js/issues/8592 */}
-        {getLayout(<Component {...pageProps} err={err || pageErr} />, { ...pageProps })}
+        {httpError && [402, 403].includes(httpError.status) ? (
+          <HttpErrorPage httpError={httpError} />
+        ) : (
+          getLayout(<Component {...pageProps} err={nextJsError || pageError} />, {
+            ...pageProps,
+          })
+        )}
       </AppProviders>
       {user && <Guide user={user} />}
       <RouterProgressBar />

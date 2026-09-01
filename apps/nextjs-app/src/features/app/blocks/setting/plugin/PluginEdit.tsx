@@ -5,10 +5,13 @@ import type { IUpdatePluginRo } from '@teable/openapi';
 import {
   getPlugin,
   pluginRegenerateSecret,
+  PluginStatus,
+  submitPlugin,
   updatePlugin,
   updatePluginRoSchema,
 } from '@teable/openapi';
 import { UserAvatar } from '@teable/sdk/components';
+import { Spin } from '@teable/ui-lib';
 import {
   Button,
   Form,
@@ -22,6 +25,7 @@ import {
   Label,
   Textarea,
 } from '@teable/ui-lib/shadcn';
+import { Send } from 'lucide-react';
 import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import { useRef, useState } from 'react';
@@ -34,6 +38,7 @@ import { JsonEditor } from './component/JsonEditor';
 import { LogoEditor } from './component/LogoEditor';
 import { NewSecret } from './component/NewSecret';
 import { PositionSelector } from './component/PositionSelector';
+import { StatusBadge } from './component/StatusBadge';
 import { MarkDownEditor } from './MarkDownEditor';
 
 export const PluginEdit = (props: { secret?: string }) => {
@@ -76,6 +81,13 @@ export const PluginEdit = (props: { secret?: string }) => {
     },
   });
 
+  const { mutate: submitApproved, isPending: submitApprovedLoading } = useMutation({
+    mutationFn: submitPlugin,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['plugin', pluginId] });
+    },
+  });
+
   const onSubmit = async (data: IUpdatePluginRo) => {
     mutate(data);
   };
@@ -87,6 +99,25 @@ export const PluginEdit = (props: { secret?: string }) => {
       onSubmit={form.handleSubmit(onSubmit)}
       onCancel={() => router.push({ pathname: router.pathname })}
     >
+      {initFormValue?.status && (
+        <div className="absolute end-10 flex items-center gap-2 bg-background">
+          <StatusBadge status={initFormValue.status} />
+          {initFormValue.status === PluginStatus.Developing && (
+            <Button
+              className="h-[22px]"
+              size={'xs'}
+              variant={'outline'}
+              disabled={submitApprovedLoading}
+              onClick={() => {
+                submitApproved(pluginId);
+              }}
+            >
+              {submitApprovedLoading ? <Spin /> : <Send className="text-green-500" size={12} />}
+              {t('plugin:button.submitApproved')}
+            </Button>
+          )}
+        </div>
+      )}
       <div className="space-y-2">
         <NewSecret secret={newSecret} ref={secretRef} />
         <div>
@@ -106,15 +137,17 @@ export const PluginEdit = (props: { secret?: string }) => {
         <div className="space-y-2">
           <Label>
             {t('plugin:secret')}
-            <Button
-              className="ml-2 h-auto p-1.5"
-              title={t('plugin:regenerateSecret')}
-              size={'xs'}
-              variant={'outline'}
-              onClick={() => regenerateSecret(pluginId)}
-            >
-              <RefreshCcw />
-            </Button>
+            {!initFormValue?.isSystem && (
+              <Button
+                className="ms-2 h-auto p-1.5"
+                title={t('plugin:regenerateSecret')}
+                size={'xs'}
+                variant={'outline'}
+                onClick={() => regenerateSecret(pluginId)}
+              >
+                <RefreshCcw />
+              </Button>
+            )}
           </Label>
           <div className="text-sm font-normal">{initFormValue?.secret}</div>
         </div>
@@ -217,6 +250,20 @@ export const PluginEdit = (props: { secret?: string }) => {
                 <FormDescription>{t('plugin:form.positions.description')}</FormDescription>
                 <FormControl>
                   <PositionSelector value={field.value} onChange={field.onChange} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="config"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('plugin:form.config.label')}</FormLabel>
+                <FormDescription>{t('plugin:form.config.description')}</FormDescription>
+                <FormControl>
+                  <JsonEditor value={field.value} onChange={field.onChange} />
                 </FormControl>
                 <FormMessage />
               </FormItem>

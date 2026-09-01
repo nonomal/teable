@@ -1,10 +1,4 @@
-import {
-  BadRequestException,
-  NotFoundException,
-  Injectable,
-  Logger,
-  ForbiddenException,
-} from '@nestjs/common';
+import { Inject, NotFoundException, Injectable, Logger, Optional } from '@nestjs/common';
 import type {
   FieldAction,
   IFieldRo,
@@ -16,50 +10,72 @@ import type {
   IRole,
   TableAction,
   ViewAction,
+  BasePermission,
 } from '@teable/core';
 import {
   ActionPrefix,
   FieldKeyType,
   FieldType,
+  HttpErrorCode,
+  IdPrefix,
+  TemplateRolePermission,
   actionPrefixMap,
+  getRandomString,
   getBasePermission,
+  isLinkLookupOptions,
 } from '@teable/core';
-import { PrismaService } from '@teable/db-main-prisma';
-import {
-  ResourceType,
-  type ICreateRecordsRo,
-  type ICreateTableRo,
-  type ICreateTableWithDefault,
-  type ITableFullVo,
-  type ITablePermissionVo,
-  type ITableVo,
-  type IUpdateOrderRo,
+import { PrismaService, ProvisionState } from '@teable/db-main-prisma';
+import type {
+  ICreateRecordsRo,
+  ICreateTableRo,
+  IDuplicateTableRo,
+  ITableDeleteReferencesVo,
+  ITableFullVo,
+  ITablePermissionVo,
+  ITableVo,
+  IUpdateOrderRo,
 } from '@teable/openapi';
+import { CreateRecordAction, ResourceType, ICreateTableWithDefault } from '@teable/openapi';
 import { nanoid } from 'nanoid';
+import { ClsService } from 'nestjs-cls';
 import { ThresholdConfig, IThresholdConfig } from '../../../configs/threshold.config';
+import { CustomHttpException } from '../../../custom.exception';
 import { InjectDbProvider } from '../../../db-provider/db.provider';
 import { IDbProvider } from '../../../db-provider/db.provider.interface';
+import { EventEmitterService } from '../../../event-emitter/event-emitter.service';
+import { Events } from '../../../event-emitter/events';
+import type { IDataDbRoutingOptions } from '../../../global/data-db-client-manager.service';
+import { handleBestEffortDataDbDropError } from '../../../global/data-db-runtime-error';
+import { DatabaseRouter } from '../../../global/database-router.service';
+import { RawOpType } from '../../../share-db/interface';
+import type { IClsStore } from '../../../types/cls';
 import { updateOrder } from '../../../utils/update-order';
+import { AuditScope } from '../../audit/audit-scope';
+import { Audit } from '../../audit/audit.decorator';
 import { PermissionService } from '../../auth/permission.service';
+import { BatchService } from '../../calculation/batch.service';
 import { LinkService } from '../../calculation/link.service';
 import { FieldCreatingService } from '../../field/field-calculate/field-creating.service';
 import { FieldSupplementService } from '../../field/field-calculate/field-supplement.service';
 import { createFieldInstanceByVo } from '../../field/model/factory';
 import { FieldOpenApiService } from '../../field/open-api/field-open-api.service';
-import { GraphService } from '../../graph/graph.service';
 import { RecordOpenApiService } from '../../record/open-api/record-open-api.service';
 import { RecordService } from '../../record/record.service';
+import { RecordHistoryColdStorageService } from '../../record-history-cold/record-history-cold-storage.service';
+import { SpaceDataDbMigrationGuardService } from '../../space/space-data-db-migration-guard.service';
 import { ViewOpenApiService } from '../../view/open-api/view-open-api.service';
+import { TableDuplicateService } from '../table-duplicate.service';
 import { TableService } from '../table.service';
+import { TableMutationCacheInvalidator } from './table-mutation-cache-invalidator';
 
 @Injectable()
 export class TableOpenApiService {
   private logger = new Logger(TableOpenApiService.name);
   constructor(
     private readonly prismaService: PrismaService,
+    private readonly databaseRouter: DatabaseRouter,
     private readonly recordOpenApiService: RecordOpenApiService,
     private readonly viewOpenApiService: ViewOpenApiService,
-    private readonly graphService: GraphService,
     private readonly recordService: RecordService,
     private readonly tableService: TableService,
     private readonly linkService: LinkService,
@@ -67,13 +83,31 @@ export class TableOpenApiService {
     private readonly fieldCreatingService: FieldCreatingService,
     private readonly fieldSupplementService: FieldSupplementService,
     private readonly permissionService: PermissionService,
+    private readonly tableDuplicateService: TableDuplicateService,
+    private readonly batchService: BatchService,
     @InjectDbProvider() private readonly dbProvider: IDbProvider,
-    @ThresholdConfig() private readonly thresholdConfig: IThresholdConfig
+    @ThresholdConfig() private readonly thresholdConfig: IThresholdConfig,
+    private readonly cls: ClsService<IClsStore>,
+    private readonly eventEmitterService: EventEmitterService,
+    private readonly tableMutationCacheInvalidator: TableMutationCacheInvalidator,
+    private readonly audit: AuditScope,
+    private readonly recordHistoryColdStorage: RecordHistoryColdStorageService,
+    @Optional()
+    @Inject(SpaceDataDbMigrationGuardService)
+    private readonly spaceDataDbMigrationGuard?: SpaceDataDbMigrationGuardService
   ) {}
+
+  private async assertBaseWritable(baseId: string) {
+    await this.spaceDataDbMigrationGuard?.assertBaseWritable(baseId);
+  }
+
+  private async assertTableWritable(tableId: string) {
+    await this.spaceDataDbMigrationGuard?.assertTableWritable(tableId);
+  }
 
   private async createView(tableId: string, viewRos: IViewRo[]) {
     const viewCreationPromises = viewRos.map(async (viewRo) => {
-      return this.viewOpenApiService.createView(tableId, viewRo);
+      return this.viewOpenApiService.createView(tableId, viewRo, { ensureRowOrder: false });
     });
     return await Promise.all(viewCreationPromises);
   }
@@ -83,7 +117,15 @@ export class TableOpenApiService {
     const fieldNameSet = new Set<string>();
     for (const fieldVo of fieldVos) {
       if (fieldNameSet.has(fieldVo.name)) {
-        throw new BadRequestException(`duplicate field name: ${fieldVo.name}`);
+        throw new CustomHttpException(
+          `Field name ${fieldVo.name} already exists`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.field.fieldNameAlreadyExists',
+            },
+          }
+        );
       }
       fieldNameSet.add(fieldVo.name);
       const fieldInstance = createFieldInstanceByVo(fieldVo);
@@ -93,43 +135,154 @@ export class TableOpenApiService {
     return fieldSnapshots;
   }
 
+  private async createFields(tableId: string, fieldVos: IFieldVo[]) {
+    const fieldNameSet = new Set<string>();
+
+    for (const fieldVo of fieldVos) {
+      if (fieldNameSet.has(fieldVo.name)) {
+        throw new CustomHttpException(
+          `Field name ${fieldVo.name} already exists`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.field.fieldNameAlreadyExists',
+            },
+          }
+        );
+      }
+      fieldNameSet.add(fieldVo.name);
+    }
+
+    const fieldInstances = fieldVos.map((fieldVo) => createFieldInstanceByVo(fieldVo));
+
+    await this.fieldCreatingService.alterCreateFields(tableId, fieldInstances);
+
+    return fieldVos;
+  }
+
   private async createRecords(tableId: string, data: ICreateRecordsRo) {
     return this.recordOpenApiService.createRecords(tableId, data);
   }
 
+  private async completeTableCreateSchemaOperation(
+    baseId: string,
+    tableId: string,
+    recordCount: number
+  ) {
+    const now = new Date();
+    const userId = this.cls.get('user.id');
+
+    await this.prismaService.txClient().schemaOperation.upsert({
+      where: {
+        idempotencyKey: `table.create:table:${tableId}`,
+      },
+      create: {
+        id: `sgo${getRandomString(16)}`,
+        type: 'table.create',
+        status: 'ready',
+        phase: 'ready',
+        resourceType: 'table',
+        resourceId: tableId,
+        baseId,
+        tableId,
+        idempotencyKey: `table.create:table:${tableId}`,
+        payload: { recordCount },
+        attempts: 0,
+        maxAttempts: 8,
+        nextRunAt: now,
+        createdBy: userId,
+        lastModifiedTime: now,
+        lastModifiedBy: userId,
+      },
+      update: {
+        type: 'table.create',
+        status: 'ready',
+        phase: 'ready',
+        resourceType: 'table',
+        resourceId: tableId,
+        baseId,
+        tableId,
+        payload: { recordCount },
+        attempts: 0,
+        maxAttempts: 8,
+        nextRunAt: now,
+        lockedAt: null,
+        lockedBy: null,
+        lastError: null,
+        lastModifiedBy: userId,
+      },
+    });
+  }
+
+  private async cleanupCreatedDataTable(
+    baseId: string,
+    table: Pick<ITableVo, 'id' | 'dbTableName'> | undefined,
+    reason: unknown
+  ) {
+    if (!table?.dbTableName) {
+      return;
+    }
+
+    try {
+      await this.databaseRouter.executeDataPrismaForBase(
+        baseId,
+        this.dbProvider.dropTable(table.dbTableName)
+      );
+      await this.tableMutationCacheInvalidator.invalidateDroppedTable(table.dbTableName);
+    } catch (cleanupError) {
+      this.logger.error(
+        `Failed to clean up data table ${table.dbTableName} (${table.id}) after table creation rollback: ${
+          reason instanceof Error ? reason.message : String(reason)
+        }`,
+        cleanupError instanceof Error ? cleanupError.stack : undefined
+      );
+    }
+  }
+
   private async prepareFields(tableId: string, fieldRos: IFieldRo[]) {
-    const fields: IFieldVo[] = [];
-    const simpleFields: IFieldRo[] = [];
-    const computeFields: IFieldRo[] = [];
+    const independentFields: IFieldRo[] = [];
+    const dependentFields: IFieldRo[] = [];
     fieldRos.forEach((field) => {
-      if (field.type === FieldType.Link || field.type === FieldType.Formula || field.isLookup) {
-        computeFields.push(field);
+      if (field.type === FieldType.Formula || field.type === FieldType.Rollup || field.isLookup) {
+        dependentFields.push(field);
       } else {
-        simpleFields.push(field);
+        independentFields.push(field);
       }
     });
 
-    for (const fieldRo of simpleFields) {
-      fields.push(await this.fieldSupplementService.prepareCreateField(tableId, fieldRo));
-    }
+    const fields: IFieldVo[] = await this.fieldSupplementService.prepareCreateFields(
+      tableId,
+      independentFields,
+      undefined,
+      { useTransaction: true }
+    );
 
-    const allFieldRos = simpleFields.concat(computeFields);
-    for (const fieldRo of computeFields) {
-      fields.push(
-        await this.fieldSupplementService.prepareCreateField(
-          tableId,
-          fieldRo,
-          allFieldRos.filter((ro) => ro !== fieldRo) as IFieldVo[]
-        )
+    const allFieldRos = independentFields.concat(dependentFields);
+
+    const fieldVoMap = new Map<IFieldRo, IFieldVo>();
+    independentFields.forEach((f, i) => fieldVoMap.set(f, fields[i]));
+
+    for (const fieldRo of dependentFields) {
+      const batchFieldVos = allFieldRos
+        .filter((ro) => ro !== fieldRo)
+        .map((ro) => fieldVoMap.get(ro) ?? (ro as unknown as IFieldVo));
+      const computedFieldVo = await this.fieldSupplementService.prepareCreateField(
+        tableId,
+        fieldRo,
+        batchFieldVos,
+        { useTransaction: true }
       );
+      fieldVoMap.set(fieldRo, computedFieldVo);
     }
 
-    const repeatedDbFieldNames = fields
+    const orderedFields = fieldRos.map((ro) => fieldVoMap.get(ro)).filter(Boolean) as IFieldVo[];
+
+    const repeatedDbFieldNames = orderedFields
       .map((f) => f.dbFieldName)
       .filter((value, index, self) => self.indexOf(value) !== index);
 
     // generator dbFieldName may repeat, this is fix it.
-    return fields.map((f) => {
+    return orderedFields.map((f) => {
       const newField = { ...f };
       const { dbFieldName } = newField;
 
@@ -142,39 +295,94 @@ export class TableOpenApiService {
   }
 
   async createTable(baseId: string, tableRo: ICreateTableWithDefault): Promise<ITableFullVo> {
-    const schema = await this.prismaService.$tx(async () => {
-      const tableVo = await this.createTableMeta(baseId, tableRo);
-      const tableId = tableVo.id;
-      const preparedFields = await this.prepareFields(tableId, tableRo.fields);
-      // create teable should not set computed field isPending, because noting need to calculate when create
-      preparedFields.forEach((field) => delete field.isPending);
-      const fieldVos = await this.createField(tableId, preparedFields);
-      const viewVos = await this.createView(tableId, tableRo.views);
+    await this.assertBaseWritable(baseId);
+    let createdTable: ITableVo | undefined;
+    const schema = await this.prismaService
+      .$tx(async () => {
+        const tableVo = await this.createTableMeta(baseId, tableRo);
+        createdTable = tableVo;
+        const tableId = tableVo.id;
 
-      return {
-        ...tableVo,
-        total: tableRo.records?.length || 0,
-        fields: fieldVos,
-        views: viewVos,
-        defaultViewId: viewVos[0].id,
-      };
-    });
+        // Mark the first field as primary BEFORE prepareFields so the validation in
+        // prepareCreateFields catches bad-type / lookup-ish primaries from internal callers
+        // (template/import/AI) that don't go through the prepareCreateTableRo pipe.
+        if (
+          tableRo.fields.length &&
+          !tableRo.fields.find((field) => (field as IFieldVo).isPrimary)
+        ) {
+          (tableRo.fields[0] as IFieldVo).isPrimary = true;
+        }
 
-    const records = await this.prismaService.$tx(async () => {
+        const preparedFields = await this.prepareFields(tableId, tableRo.fields);
+
+        // create teable should not set computed field isPending, because noting need to calculate when create
+        preparedFields.forEach((field) => delete field.isPending);
+        await this.createFields(tableId, preparedFields);
+
+        const viewVos = await this.createView(tableId, tableRo.views);
+        const allFieldVos = await this.fieldOpenApiService.getFields(tableId, {
+          filterHidden: false,
+        });
+
+        // Maintain original field order from input to ensure consistent API response
+        const fieldIdOrder = new Map(preparedFields.map((f, i) => [f.id, i]));
+        const fieldVos = allFieldVos.sort((a, b) => {
+          const orderA = fieldIdOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+          const orderB = fieldIdOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+          return orderA - orderB;
+        });
+        await this.completeTableCreateSchemaOperation(
+          baseId,
+          tableId,
+          tableRo.records?.length ?? 0
+        );
+
+        return {
+          ...tableVo,
+          total: tableRo.records?.length || 0,
+          fields: fieldVos,
+          views: viewVos,
+          defaultViewId: viewVos[0].id,
+        };
+      })
+      .catch(async (error) => {
+        await this.cleanupCreatedDataTable(baseId, createdTable, error);
+        throw error;
+      });
+
+    const records = await this.createInitialRecords(schema.id, tableRo);
+    return { ...schema, records };
+  }
+
+  @Audit({
+    // Only mark with CreateDefaultRecords when the caller is actually creating the
+    // canonical 3-empty-row default; otherwise (custom records or no records) skip.
+    rootAction: (_tableId: string, ro: ICreateTableWithDefault) => {
+      const isDefault =
+        ro.records?.length === 3 &&
+        ro.records?.every(({ fields }) => Object.keys(fields).length === 0);
+      return isDefault ? CreateRecordAction.CreateDefaultRecords : undefined;
+    },
+    resourceId: (tableId: string) => tableId,
+    params: (_tableId: string, ro: ICreateTableWithDefault) =>
+      ro as unknown as Record<string, unknown>,
+  })
+  private async createInitialRecords(tableId: string, tableRo: ICreateTableWithDefault) {
+    return this.prismaService.$tx(async () => {
       const recordsVo =
         tableRo.records?.length &&
-        (await this.createRecords(schema.id, {
+        (await this.createRecords(tableId, {
           records: tableRo.records,
           fieldKeyType: tableRo.fieldKeyType ?? FieldKeyType.Name,
         }));
-
       return recordsVo ? recordsVo.records : [];
     });
+  }
 
-    return {
-      ...schema,
-      records,
-    };
+  async duplicateTable(baseId: string, tableId: string, tableRo: IDuplicateTableRo) {
+    await this.assertBaseWritable(baseId);
+    await this.assertTableWritable(tableId);
+    return await this.tableDuplicateService.duplicateTable(baseId, tableId, tableRo);
   }
 
   async createTableMeta(baseId: string, tableRo: ICreateTableRo) {
@@ -191,45 +399,131 @@ export class TableOpenApiService {
       where: {
         baseId,
         deletedTime: null,
+        provisionState: ProvisionState.ready,
         id: includeTableIds ? { in: includeTableIds } : undefined,
       },
     });
     const tableIds = tablesMeta.map((tableMeta) => tableMeta.id);
-    const tableTime = await this.tableService.getTableLastModifiedTime(tableIds);
     const tableDefaultViewIds = await this.tableService.getTableDefaultViewId(tableIds);
     return tablesMeta.map((tableMeta, i) => {
-      const time = tableTime[i];
       const defaultViewId = tableDefaultViewIds[i];
       if (!defaultViewId) {
-        throw new Error('defaultViewId is not found');
+        throw new CustomHttpException(
+          `defaultViewId is not found in table ${tableMeta.id}`,
+          HttpErrorCode.NOT_FOUND,
+          {
+            localization: {
+              i18nKey: 'httpErrors.view.defaultViewNotFound',
+            },
+          }
+        );
       }
       return {
         ...tableMeta,
         description: tableMeta.description ?? undefined,
         icon: tableMeta.icon ?? undefined,
-        lastModifiedTime: time || tableMeta.lastModifiedTime?.toISOString(),
+        lastModifiedTime:
+          tableMeta.lastModifiedTime?.toISOString() || tableMeta.createdTime.toISOString(),
         defaultViewId,
       };
     });
   }
 
-  async detachLink(tableId: string) {
-    // handle the link field in this table
-    const linkFields = await this.prismaService.txClient().field.findMany({
-      where: { tableId, type: FieldType.Link, isLookup: null, deletedTime: null },
-      select: { id: true },
-    });
+  async getDeleteTableReferences(tableId: string): Promise<ITableDeleteReferencesVo> {
+    const relatedLinkFieldRaws = await this.linkService.getRelatedLinkFieldRaws(tableId);
+    const inboundLinks = relatedLinkFieldRaws.filter((field) => field.tableId !== tableId);
+    const inboundLinkIds = inboundLinks.map((field) => field.id);
 
-    for (const field of linkFields) {
-      await this.fieldOpenApiService.convertField(tableId, field.id, {
-        type: FieldType.SingleLineText,
+    const dependentFieldIds = inboundLinkIds.length
+      ? (
+          await this.prismaService.reference.findMany({
+            where: { fromFieldId: { in: inboundLinkIds } },
+            select: { toFieldId: true },
+          })
+        ).map((ref) => ref.toFieldId)
+      : [];
+
+    const extraDependents =
+      dependentFieldIds.length > 0
+        ? await this.prismaService.field.findMany({
+            where: {
+              id: { in: dependentFieldIds },
+              tableId: { not: tableId },
+              deletedTime: null,
+            },
+            select: { id: true, name: true, type: true, tableId: true },
+          })
+        : [];
+
+    const fieldById = new Map<
+      string,
+      { id: string; name: string; type: string; tableId: string }
+    >();
+    for (const field of inboundLinks) {
+      fieldById.set(field.id, {
+        id: field.id,
+        name: field.name,
+        type: field.type,
+        tableId: field.tableId,
       });
     }
+    for (const field of extraDependents) {
+      fieldById.set(field.id, field);
+    }
 
-    // handle the link field in related tables
+    const tableIds = [...new Set([...fieldById.values()].map((field) => field.tableId))];
+    if (tableIds.length === 0) {
+      return { dependentFields: [] };
+    }
+
+    const tables = await this.prismaService.tableMeta.findMany({
+      where: { id: { in: tableIds } },
+      select: { id: true, name: true, icon: true, baseId: true },
+    });
+    const bases = await this.prismaService.base.findMany({
+      where: { id: { in: [...new Set(tables.map((table) => table.baseId))] } },
+      select: { id: true, name: true, icon: true },
+    });
+    const baseById = new Map(bases.map((base) => [base.id, base]));
+    const tableById = new Map(tables.map((table) => [table.id, table]));
+
+    return {
+      dependentFields: [...fieldById.values()].flatMap((field) => {
+        const table = tableById.get(field.tableId);
+        const base = table ? baseById.get(table.baseId) : undefined;
+        if (!table || !base) {
+          return [];
+        }
+        return [
+          {
+            id: field.id,
+            name: field.name,
+            type: field.type,
+            source: {
+              id: table.id,
+              name: table.name,
+              icon: table.icon,
+              base: {
+                id: base.id,
+                name: base.name,
+                icon: base.icon,
+              },
+            },
+          },
+        ];
+      }),
+    };
+  }
+
+  async detachLink(tableId: string) {
+    // Only surviving tables need detaching. The deleted table's own link fields can remain intact
+    // so that a later restore can preserve their original link configuration.
     const relatedLinkFieldRaws = await this.linkService.getRelatedLinkFieldRaws(tableId);
 
     for (const field of relatedLinkFieldRaws) {
+      if (field.tableId === tableId) {
+        continue;
+      }
       await this.fieldOpenApiService.convertField(field.tableId, field.id, {
         type: FieldType.SingleLineText,
       });
@@ -237,6 +531,7 @@ export class TableOpenApiService {
   }
 
   async permanentDeleteTables(baseId: string, tableIds: string[]) {
+    await this.assertBaseWritable(baseId);
     // If the table has already been deleted, exceptions may occur
     // If the table hasn't been deleted and permanent deletion is executed directly,
     // we need to handle the deletion of associated data
@@ -248,28 +543,106 @@ export class TableOpenApiService {
       console.log('Permanent delete tables error:', e);
     }
 
-    return await this.prismaService.$tx(
+    const result = await this.prismaService.$tx(
       async () => {
         await this.dropTables(tableIds);
-        await this.cleanTablesRelatedData(baseId, tableIds);
+        await this.cleanTaskRelatedData(tableIds);
+        await this.cleanTablesRelatedData(baseId, tableIds, { useTransaction: true });
       },
       {
         timeout: this.thresholdConfig.bigTransactionTimeout,
       }
     );
+    await this.cleanupColdHistoryPrefixes(tableIds);
+    return result;
+  }
+
+  /**
+   * Best-effort removal of the tables' cold-history prefixes on the private
+   * bucket. The delete is irreversible, so it must only run AFTER the DB purge
+   * transaction has committed — never inside it (a rollback would restore the
+   * table without its cold history). An S3 miss never fails the purge;
+   * leftover prefixes are reconciled by ops tooling against table existence.
+   */
+  async cleanupColdHistoryPrefixes(tableIds: string[]) {
+    for (const tableId of tableIds) {
+      await this.recordHistoryColdStorage
+        .deleteTablePrefix(tableId)
+        .catch((error) =>
+          this.logger.warn(`failed to delete cold history prefix for ${tableId}: ${error}`)
+        );
+    }
   }
 
   async dropTables(tableIds: string[]) {
     const tables = await this.prismaService.txClient().tableMeta.findMany({
       where: { id: { in: tableIds } },
-      select: { dbTableName: true },
+      select: { dbTableName: true, version: true, id: true, baseId: true, deletedTime: true },
+    });
+    for (const table of tables) {
+      if (!table.deletedTime) {
+        await this.batchService.saveRawOps(table.baseId, RawOpType.Del, IdPrefix.Table, [
+          { docId: table.id, version: table.version },
+        ]);
+      }
+      try {
+        await this.databaseRouter.executeDataPrismaForTable(
+          table.id,
+          this.dbProvider.dropTable(table.dbTableName),
+          { useTransaction: true }
+        );
+      } catch (error) {
+        handleBestEffortDataDbDropError({
+          error,
+          isMetaFallback: await this.databaseRouter.isMetaFallbackForBase(table.baseId, {
+            useTransaction: true,
+          }),
+          logger: this.logger,
+          target: `table ${table.id}`,
+        });
+      }
+      try {
+        await this.tableMutationCacheInvalidator.invalidateDroppedTable(table.dbTableName);
+      } catch (error) {
+        handleBestEffortDataDbDropError({
+          error,
+          isMetaFallback: await this.databaseRouter.isMetaFallbackForBase(table.baseId, {
+            useTransaction: true,
+          }),
+          logger: this.logger,
+          target: `mutation cache for table ${table.id}`,
+        });
+      }
+    }
+  }
+
+  async cleanTaskRelatedData(tableIds: string[]) {
+    const alternativeFields = await this.prismaService.txClient().field.findMany({
+      where: { tableId: { in: tableIds } },
+      select: { id: true },
+    });
+    const alternativeFieldIds = alternativeFields.map((field) => field.id);
+
+    // clean task reference for fields
+    await this.prismaService.txClient().taskReference.deleteMany({
+      where: {
+        OR: [
+          { fromFieldId: { in: alternativeFieldIds } },
+          { toFieldId: { in: alternativeFieldIds } },
+        ],
+      },
     });
 
-    for (const table of tables) {
-      await this.prismaService
-        .txClient()
-        .$executeRawUnsafe(this.dbProvider.dropTable(table.dbTableName));
-    }
+    // clean task for table
+    await this.prismaService.txClient().task.deleteMany({
+      where: {
+        OR: tableIds.map((tableId) => ({
+          snapshot: {
+            contains: `"tableId":"${tableId}"`,
+          },
+        })),
+      },
+    });
   }
 
   async cleanReferenceFieldIds(tableIds: string[]) {
@@ -283,48 +656,85 @@ export class TableOpenApiService {
     });
   }
 
-  async cleanTablesRelatedData(baseId: string, tableIds: string[]) {
+  async cleanTablesRelatedData(
+    baseId: string,
+    tableIds: string[],
+    routingOptions?: IDataDbRoutingOptions
+  ) {
+    const metaPrisma = this.prismaService.txClient();
+
     // delete field for table
-    await this.prismaService.txClient().field.deleteMany({
+    await metaPrisma.field.deleteMany({
       where: { tableId: { in: tableIds } },
     });
 
     // delete view for table
-    await this.prismaService.txClient().view.deleteMany({
+    await metaPrisma.view.deleteMany({
       where: { tableId: { in: tableIds } },
     });
 
     // clean attachment for table
-    await this.prismaService.txClient().attachmentsTable.deleteMany({
+    await metaPrisma.attachmentsTable.deleteMany({
       where: { tableId: { in: tableIds } },
     });
 
     // clear ops for view/field/record
-    await this.prismaService.txClient().ops.deleteMany({
+    await metaPrisma.ops.deleteMany({
       where: { collection: { in: tableIds } },
     });
 
     // clean ops for table
-    await this.prismaService.txClient().ops.deleteMany({
+    await metaPrisma.ops.deleteMany({
       where: { collection: baseId, docId: { in: tableIds } },
     });
 
-    await this.prismaService.txClient().tableMeta.deleteMany({
+    await metaPrisma.tableMeta.deleteMany({
       where: { id: { in: tableIds } },
     });
 
-    // clean record history for table
-    await this.prismaService.txClient().recordHistory.deleteMany({
-      where: { tableId: { in: tableIds } },
+    // record history and trash snapshots live with the physical record tables on the data DB.
+    // Nested so one swallowed purge (a relation the bound database never had) cannot skip the
+    // others and orphan their rows, while a gone database still skips all three.
+    const bestEffort = async (target: string, purge: () => Promise<unknown>) => {
+      try {
+        await purge();
+      } catch (error) {
+        handleBestEffortDataDbDropError({
+          error,
+          isMetaFallback: await this.databaseRouter.isMetaFallbackForBase(baseId, routingOptions),
+          logger: this.logger,
+          target,
+        });
+      }
+    };
+    const tables = tableIds.join(', ');
+    await bestEffort(`data database for base ${baseId}`, async () => {
+      const routedDataPrisma = await this.databaseRouter.dataPrismaForBase(baseId, routingOptions);
+      const dataPrisma =
+        'txClient' in routedDataPrisma && typeof routedDataPrisma.txClient === 'function'
+          ? routedDataPrisma.txClient()
+          : routedDataPrisma;
+      const where = { tableId: { in: tableIds } };
+
+      await bestEffort(`record history for tables ${tables}`, () =>
+        dataPrisma.recordHistory.deleteMany({ where })
+      );
+      await bestEffort(`table trash for tables ${tables}`, () =>
+        dataPrisma.tableTrash.deleteMany({ where })
+      );
+      await bestEffort(`record trash for tables ${tables}`, () =>
+        dataPrisma.recordTrash.deleteMany({ where })
+      );
     });
 
     // clean trash for table
-    await this.prismaService.txClient().trash.deleteMany({
+    await metaPrisma.trash.deleteMany({
       where: { resourceId: { in: tableIds }, resourceType: ResourceType.Table },
     });
   }
 
   async deleteTable(baseId: string, tableId: string) {
+    await this.assertBaseWritable(baseId);
     try {
       await this.detachLink(tableId);
     } catch (e) {
@@ -354,6 +764,7 @@ export class TableOpenApiService {
   }
 
   async restoreTable(baseId: string, tableId: string) {
+    await this.assertBaseWritable(baseId);
     return await this.prismaService.$tx(
       async (prisma) => {
         const { deletedTime } = await prisma.trash.findFirstOrThrow({
@@ -361,8 +772,14 @@ export class TableOpenApiService {
         });
 
         if (!deletedTime) {
-          throw new ForbiddenException(
-            'Unable to restore this table because it is not in the trash'
+          throw new CustomHttpException(
+            'Unable to restore this table because it is not in the trash',
+            HttpErrorCode.VALIDATION_ERROR,
+            {
+              localization: {
+                i18nKey: 'httpErrors.table.notInTrash',
+              },
+            }
           );
         }
 
@@ -377,10 +794,6 @@ export class TableOpenApiService {
           where: { tableId, deletedTime },
           data: { deletedTime: null },
         });
-
-        await prisma.trash.deleteMany({
-          where: { resourceId: tableId },
-        });
       },
       {
         timeout: this.thresholdConfig.bigTransactionTimeout,
@@ -390,9 +803,13 @@ export class TableOpenApiService {
 
   async sqlQuery(tableId: string, viewId: string, sql: string) {
     this.logger.log('sqlQuery:sql: ' + sql);
-    const { queryBuilder } = await this.recordService.buildFilterSortQuery(tableId, {
-      viewId,
-    });
+    const { queryBuilder } = await this.recordService.buildFilterSortQuery(
+      tableId,
+      {
+        viewId,
+      },
+      true
+    );
 
     const baseQuery = queryBuilder.toString();
     const { dbTableName } = await this.prismaService.tableMeta.findFirstOrThrow({
@@ -406,11 +823,7 @@ export class TableOpenApiService {
     `;
     this.logger.log('sqlQuery:sql:combine: ' + combinedQuery);
 
-    return this.prismaService.$queryRawUnsafe(combinedQuery);
-  }
-
-  async getGraph(tableId: string, cell: [string, string]) {
-    return this.graphService.getGraph(tableId, cell);
+    return this.databaseRouter.queryDataPrismaForTable(tableId, combinedQuery);
   }
 
   async updateName(baseId: string, tableId: string, name: string) {
@@ -419,7 +832,7 @@ export class TableOpenApiService {
     });
   }
 
-  async updateIcon(baseId: string, tableId: string, icon: string) {
+  async updateIcon(baseId: string, tableId: string, icon: string | null) {
     await this.prismaService.$tx(async () => {
       await this.tableService.updateTable(baseId, tableId, { icon });
     });
@@ -432,6 +845,7 @@ export class TableOpenApiService {
   }
 
   async updateDbTableName(baseId: string, tableId: string, dbTableNameRo: string) {
+    await this.assertBaseWritable(baseId);
     const dbTableName = this.dbProvider.joinDbTableName(baseId, dbTableNameRo);
     const existDbTableName = await this.prismaService.tableMeta
       .findFirst({
@@ -443,7 +857,15 @@ export class TableOpenApiService {
       });
 
     if (existDbTableName) {
-      throw new BadRequestException(`dbTableName ${dbTableNameRo} already exists`);
+      throw new CustomHttpException(
+        `dbTableName ${dbTableNameRo} already exists`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.table.dbTableNameAlreadyExists',
+          },
+        }
+      );
     }
 
     const { dbTableName: oldDbTableName } = await this.prismaService.tableMeta
@@ -452,70 +874,97 @@ export class TableOpenApiService {
         select: { dbTableName: true },
       })
       .catch(() => {
-        throw new NotFoundException(`table ${tableId} not found`);
+        throw new CustomHttpException(`table ${tableId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.table.notFound',
+          },
+        });
       });
 
-    const linkFieldsRaw = await this.prismaService.field.findMany({
-      where: { table: { baseId }, type: FieldType.Link },
-      select: { id: true, options: true },
-    });
+    const linkFieldsQuery = this.dbProvider.optionsQuery(
+      FieldType.Link,
+      'fkHostTableName',
+      oldDbTableName
+    );
+    const lookupFieldsQuery = this.dbProvider.lookupOptionsQuery('fkHostTableName', oldDbTableName);
 
-    const relationalFieldsRaw = await this.prismaService.field.findMany({
-      where: { table: { baseId }, lookupOptions: { not: null } },
-      select: { id: true, lookupOptions: true },
-    });
+    const renameSql = this.dbProvider.renameTableName(oldDbTableName, dbTableName);
+    const rollbackRenameSql = this.dbProvider.renameTableName(dbTableName, oldDbTableName);
 
-    await this.prismaService.$tx(async (prisma) => {
-      await Promise.all(
-        linkFieldsRaw
-          .map((field) => ({
-            ...field,
-            options: JSON.parse(field.options as string) as ILinkFieldOptions,
-          }))
-          .filter((field) => {
-            return field.options.fkHostTableName === oldDbTableName;
-          })
-          .map((field) => {
-            return prisma.field.update({
-              where: { id: field.id },
-              data: { options: JSON.stringify({ ...field.options, fkHostTableName: dbTableName }) },
-            });
-          })
-      );
-
-      await Promise.all(
-        relationalFieldsRaw
-          .map((field) => ({
-            ...field,
-            lookupOptions: JSON.parse(field.lookupOptions as string) as ILookupOptionsVo,
-          }))
-          .filter((field) => {
-            return field.lookupOptions.fkHostTableName === oldDbTableName;
-          })
-          .map((field) => {
-            return prisma.field.update({
-              where: { id: field.id },
-              data: {
-                lookupOptions: JSON.stringify({
-                  ...field.lookupOptions,
-                  fkHostTableName: dbTableName,
-                }),
-              },
-            });
-          })
-      );
-
-      await this.tableService.updateTable(baseId, tableId, { dbTableName });
-      const renameSql = this.dbProvider.renameTableName(oldDbTableName, dbTableName);
-      for (const sql of renameSql) {
-        await prisma.$executeRawUnsafe(sql);
+    await this.databaseRouter.dataPrismaTransactionForTable(
+      tableId,
+      async (prisma) => {
+        for (const sql of renameSql) {
+          await prisma.$executeRawUnsafe(sql);
+        }
+      },
+      {
+        timeout: this.thresholdConfig.bigTransactionTimeout,
       }
-    });
+    );
+
+    try {
+      await this.prismaService.$tx(async (prisma) => {
+        const linkFieldsRaw =
+          await prisma.$queryRawUnsafe<{ id: string; options: string }[]>(linkFieldsQuery);
+        const lookupFieldsRaw =
+          await prisma.$queryRawUnsafe<{ id: string; lookupOptions: string }[]>(lookupFieldsQuery);
+
+        for (const field of linkFieldsRaw) {
+          const options = JSON.parse(field.options as string) as ILinkFieldOptions;
+          await prisma.field.update({
+            where: { id: field.id },
+            data: { options: JSON.stringify({ ...options, fkHostTableName: dbTableName }) },
+          });
+        }
+
+        for (const field of lookupFieldsRaw) {
+          const lookupOptions = JSON.parse(field.lookupOptions as string) as ILookupOptionsVo;
+          if (!isLinkLookupOptions(lookupOptions)) {
+            continue;
+          }
+          await prisma.field.update({
+            where: { id: field.id },
+            data: {
+              lookupOptions: JSON.stringify({
+                ...lookupOptions,
+                fkHostTableName: dbTableName,
+              }),
+            },
+          });
+        }
+
+        await this.tableService.updateTable(baseId, tableId, { dbTableName });
+      });
+    } catch (error) {
+      await this.databaseRouter
+        .dataPrismaTransactionForTable(
+          tableId,
+          async (prisma) => {
+            for (const sql of rollbackRenameSql) {
+              await prisma.$executeRawUnsafe(sql);
+            }
+          },
+          {
+            timeout: this.thresholdConfig.bigTransactionTimeout,
+          }
+        )
+        .catch((rollbackError) => {
+          this.logger.error(
+            `Failed to rollback data table rename ${dbTableName} -> ${oldDbTableName}: ${
+              rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+            }`,
+            rollbackError instanceof Error ? rollbackError.stack : undefined
+          );
+        });
+      throw error;
+    }
   }
 
   async shuffle(baseId: string) {
+    await this.assertBaseWritable(baseId);
     const tables = await this.prismaService.tableMeta.findMany({
-      where: { baseId, deletedTime: null },
+      where: { baseId, deletedTime: null, provisionState: ProvisionState.ready },
       select: { id: true },
       orderBy: { order: 'asc' },
     });
@@ -531,24 +980,53 @@ export class TableOpenApiService {
   }
 
   async updateOrder(baseId: string, tableId: string, orderRo: IUpdateOrderRo) {
+    await this.assertBaseWritable(baseId);
     const { anchorId, position } = orderRo;
+
+    const tablesOrder = await this.prismaService.txClient().tableMeta.findMany({
+      where: {
+        baseId,
+        deletedTime: null,
+        provisionState: ProvisionState.ready,
+      },
+      select: {
+        order: true,
+      },
+    });
+
+    const uniqOrder = [...new Set(tablesOrder.map((t) => t.order))];
+
+    // if the table order has the same order, should shuffle
+    const shouldShuffle = uniqOrder.length !== tablesOrder.length;
+
+    if (shouldShuffle) {
+      await this.shuffle(baseId);
+    }
 
     const table = await this.prismaService.tableMeta
       .findFirstOrThrow({
         select: { order: true, id: true },
-        where: { baseId, id: tableId, deletedTime: null },
+        where: { baseId, id: tableId, deletedTime: null, provisionState: ProvisionState.ready },
       })
       .catch(() => {
-        throw new NotFoundException(`Table ${tableId} not found`);
+        throw new CustomHttpException(`Table ${tableId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.table.notFound',
+          },
+        });
       });
 
     const anchorTable = await this.prismaService.tableMeta
       .findFirstOrThrow({
         select: { order: true, id: true },
-        where: { baseId, id: anchorId, deletedTime: null },
+        where: { baseId, id: anchorId, deletedTime: null, provisionState: ProvisionState.ready },
       })
       .catch(() => {
-        throw new NotFoundException(`Anchor ${anchorId} not found`);
+        throw new CustomHttpException(`Anchor ${anchorId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.table.anchorNotFound',
+          },
+        });
       });
 
     await updateOrder({
@@ -562,6 +1040,7 @@ export class TableOpenApiService {
           where: {
             baseId,
             deletedTime: null,
+            provisionState: ProvisionState.ready,
             order: whereOrder,
           },
           orderBy: { order: align },
@@ -581,19 +1060,39 @@ export class TableOpenApiService {
   }
 
   async getPermission(baseId: string, tableId: string): Promise<ITablePermissionVo> {
+    const baseShare = this.cls.get('baseShare');
+    if (this.cls.get('template') || this.cls.get('template.baseId') === baseId) {
+      return this.getPermissionByPermissionMap(
+        TemplateRolePermission as Record<BasePermission, boolean>
+      );
+    }
+    if (baseShare?.baseId === baseId) {
+      const clsPermissions = new Set(this.cls.get('permissions'));
+      // Build permission map from CLS permissions (already curated by permission service)
+      const permissionMap = { ...TemplateRolePermission } as Record<BasePermission, boolean>;
+      for (const perm of Object.keys(permissionMap) as BasePermission[]) {
+        if (clsPermissions.has(perm)) {
+          permissionMap[perm as BasePermission] = true;
+        }
+      }
+      return this.getPermissionByPermissionMap(permissionMap);
+    }
     let role: IRole | null = await this.permissionService.getRoleByBaseId(baseId);
     if (!role) {
       const { spaceId } = await this.permissionService.getUpperIdByBaseId(baseId);
       role = await this.permissionService.getRoleBySpaceId(spaceId);
     }
     if (!role) {
-      throw new NotFoundException(`Role not found`);
+      throw new CustomHttpException(`Role not found`, HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.role.notFound',
+        },
+      });
     }
     return this.getPermissionByRole(tableId, role);
   }
 
-  async getPermissionByRole(tableId: string, role: IRole) {
-    const permissionMap = getBasePermission(role);
+  private async getPermissionByPermissionMap(permissionMap: Record<BasePermission, boolean>) {
     const tablePermission = actionPrefixMap[ActionPrefix.Table].reduce(
       (acc, action) => {
         acc[action] = permissionMap[action];
@@ -617,38 +1116,24 @@ export class TableOpenApiService {
       {} as Record<RecordAction, boolean>
     );
 
-    const fields = await this.prismaService.field.findMany({
-      where: {
-        tableId,
-        deletedTime: null,
-      },
-    });
-
-    const excludeFieldCreate = actionPrefixMap[ActionPrefix.Field].filter(
-      (action) => action !== 'field|create'
-    );
-    const fieldPermission = fields.reduce(
-      (acc, field) => {
-        acc[field.id] = excludeFieldCreate.reduce(
-          (acc, action) => {
-            acc[action] = permissionMap[action];
-            return acc;
-          },
-          {} as Record<FieldAction, boolean>
-        );
+    const fieldPermission = actionPrefixMap[ActionPrefix.Field].reduce(
+      (acc, action) => {
+        acc[action] = permissionMap[action];
         return acc;
       },
-      {} as Record<string, Record<FieldAction, boolean>>
+      {} as Record<FieldAction, boolean>
     );
 
     return {
       table: tablePermission,
-      field: {
-        fields: fieldPermission,
-        create: permissionMap['field|create'],
-      },
+      field: fieldPermission,
       record: recordPermission,
       view: viewPermission,
     };
+  }
+
+  async getPermissionByRole(tableId: string, role: IRole) {
+    const permissionMap = getBasePermission(role);
+    return this.getPermissionByPermissionMap(permissionMap);
   }
 }

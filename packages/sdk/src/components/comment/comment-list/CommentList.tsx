@@ -1,23 +1,16 @@
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { getCommentList, CommentPatchType } from '@teable/openapi';
-import type { ICommentVo, ListBaseCollaboratorVo, ICommentPatchData } from '@teable/openapi';
+import type { ICommentVo, ICommentPatchData } from '@teable/openapi';
 import { Spin, Button } from '@teable/ui-lib';
 import { isEqual } from 'lodash';
-import {
-  forwardRef,
-  useImperativeHandle,
-  useRef,
-  useMemo,
-  useEffect,
-  useCallback,
-  useState,
-} from 'react';
+import { forwardRef, useImperativeHandle, useRef, useEffect, useCallback, useState } from 'react';
 import { ReactQueryKeys } from '../../../config';
 import { useTranslation } from '../../../context/app/i18n';
 import { useSession } from '../../../hooks';
-import { useCollaborators } from '../hooks';
 import type { IBaseQueryParams } from '../types';
 import { CommentItem } from './CommentItem';
+import type { ICommentListCache } from './commentListCache';
+import { removeCommentFromPages } from './commentListCache';
 import { CommentSkeleton } from './CommentSkeleton';
 import { useCommentPatchListener } from './useCommentPatchListener';
 
@@ -32,7 +25,6 @@ export interface CommentListRefHandle {
 export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((props, ref) => {
   const { tableId, recordId, commentId } = props;
   const { t } = useTranslation();
-  const collaborators = useCollaborators();
   const listRef = useRef<HTMLDivElement>(null);
   const [commentList, setCommentList] = useState<ICommentVo[]>([]);
   const { user: self } = useSession();
@@ -44,7 +36,8 @@ export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((
 
   const queryClient = useQueryClient();
   useEffect(() => {
-    return () => queryClient.removeQueries(ReactQueryKeys.commentList(tableId, recordId));
+    return () =>
+      queryClient.removeQueries({ queryKey: ReactQueryKeys.commentList(tableId, recordId) });
   }, [queryClient, recordId, tableId]);
 
   const scrollToBottom = useCallback(() => {
@@ -80,29 +73,34 @@ export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((
         getCommentList(tableId!, recordId!, {
           cursor: pageParam?.cursor,
           take: 20,
-          direction: pageParam?.direction || 'forward',
+          direction: pageParam?.direction,
         }).then((res) => res.data),
+      initialPageParam: undefined as
+        | { cursor: string; direction: 'forward' | 'backward' }
+        | undefined,
+      getNextPageParam: () => undefined,
       getPreviousPageParam: (firstPage) =>
         firstPage.nextCursor
           ? {
               cursor: firstPage.nextCursor,
-              direction: 'forward',
+              direction: 'forward' as const,
             }
           : undefined,
-      onSuccess: (data) => {
-        // first come move to bottom
-        if (data.pages.length === 1 && listRef.current) {
-          const scrollToBottom = () => {
-            if (listRef.current) {
-              const scrollHeight = listRef.current.scrollHeight;
-              listRef.current.scrollTop = scrollHeight;
-            }
-          };
-          setTimeout(scrollToBottom, 100);
-        }
-      },
       enabled: !!tableId && !!recordId,
     });
+
+  // Handle scrolling to bottom when first page loads (v5 migration: moved from onSuccess)
+  useEffect(() => {
+    if (data?.pages.length === 1 && listRef.current) {
+      const scrollToBottom = () => {
+        if (listRef.current) {
+          const scrollHeight = listRef.current.scrollHeight;
+          listRef.current.scrollTop = scrollHeight;
+        }
+      };
+      setTimeout(scrollToBottom, 100);
+    }
+  }, [data?.pages.length]);
 
   useEffect(() => {
     let result = [...commentList];
@@ -128,6 +126,18 @@ export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((
     }
   }, [commentList, data?.pages]);
 
+  // A deleted comment has to leave the paged cache as well as the local list —
+  // the merge below unions the two, so a local-only removal is undone at once.
+  const removeComment = useCallback(
+    (deletedId: string) => {
+      queryClient.setQueryData(ReactQueryKeys.commentList(tableId, recordId), (cache) =>
+        removeCommentFromPages(cache as ICommentListCache | undefined, deletedId)
+      );
+      setCommentList((prevList) => prevList.filter((comment) => comment.id !== deletedId));
+    },
+    [queryClient, recordId, tableId]
+  );
+
   const commentListener = useCallback(
     (remoteData: unknown) => {
       const { data, type } = remoteData as ICommentPatchData;
@@ -140,7 +150,11 @@ export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((
               ...data,
             } as ICommentVo,
           ]);
-          if (data.createdBy === self.id) {
+          const createdById =
+            typeof data.createdBy === 'object' && data.createdBy !== null
+              ? (data.createdBy as { id: string }).id
+              : data.createdBy;
+          if (createdById === self.id) {
             setTimeout(() => {
               scrollToBottom();
             }, 100);
@@ -152,7 +166,7 @@ export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((
           break;
         }
         case CommentPatchType.DeleteComment: {
-          setCommentList((prevList) => prevList.filter((comment) => comment.id !== data.id));
+          removeComment(data.id as string);
           break;
         }
 
@@ -171,22 +185,13 @@ export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((
         }
       }
     },
-    [scrollDownSlightly, scrollToBottom, self.id]
+    [removeComment, scrollDownSlightly, scrollToBottom, self.id]
   );
 
   useCommentPatchListener(tableId, recordId, commentListener);
 
-  const commentListWithCollaborators = useMemo(() => {
-    return commentList.map((comment) => ({
-      ...comment,
-      createdBy: collaborators?.find(
-        (collaborator) => collaborator.userId === comment.createdBy
-      ) as ListBaseCollaboratorVo[number],
-    }));
-  }, [commentList, collaborators]);
-
   return (
-    <div className="my-1 flex w-full flex-1 flex-col overflow-y-auto px-1" ref={listRef}>
+    <div className="my-2 flex w-full flex-1 flex-col gap-2 overflow-y-auto px-2" ref={listRef}>
       {isLoading ? (
         <CommentSkeleton />
       ) : (
@@ -208,14 +213,16 @@ export const CommentList = forwardRef<CommentListRefHandle, ICommentListProps>((
             )
           )}
 
-          {commentListWithCollaborators?.length ? (
-            commentListWithCollaborators.map((comment) => (
+          {commentList?.length ? (
+            commentList.map((comment, index) => (
               <CommentItem
                 key={comment.id}
                 {...comment}
                 tableId={tableId}
                 recordId={recordId}
                 commentId={commentId}
+                index={index}
+                onDeleted={removeComment}
               />
             ))
           ) : (

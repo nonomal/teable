@@ -1,5 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
+import type { ICreatePluginRo, IGetPluginCenterListVo } from '@teable/openapi';
 import {
+  axios,
   createPlugin,
   createPluginVoSchema,
   deletePlugin,
@@ -9,16 +11,18 @@ import {
   getPlugins,
   getPluginsVoSchema,
   getPluginVoSchema,
+  PLUGIN_CENTER_GET_LIST,
   PluginPosition,
   PluginStatus,
   publishPlugin,
   submitPlugin,
   updatePlugin,
 } from '@teable/openapi';
+import { createNewUserAxios } from './utils/axios-instance/new-user';
 import { getError } from './utils/get-error';
 import { initApp } from './utils/init-app';
 
-const mockPlugin = {
+const mockPlugin: ICreatePluginRo = {
   name: 'plugin',
   logo: '/plugin/xxxxxxx',
   description: 'desc',
@@ -32,6 +36,7 @@ const mockPlugin = {
       detailDesc: 'detail',
     },
   },
+  autoCreateMember: true,
 };
 describe('PluginController', () => {
   let app: INestApplication;
@@ -88,6 +93,44 @@ describe('PluginController', () => {
     expect(error?.status).toBe(404);
   });
 
+  it('does not let another user mutate a plugin by id', async () => {
+    await submitPlugin(pluginId);
+    await publishPlugin(pluginId);
+    const attackerAxios = await createNewUserAxios({
+      email: 'plugin-owner-scope@test.com',
+      password: '12345678',
+    });
+
+    const regenerateError = await getError(() =>
+      attackerAxios.post(`/plugin/${pluginId}/regenerate-secret`)
+    );
+    const unpublishError = await getError(() =>
+      attackerAxios.patch(`/plugin/${pluginId}/unpublish`)
+    );
+    const deleteError = await getError(() => attackerAxios.delete(`/plugin/${pluginId}`));
+
+    expect(regenerateError?.status).toBe(404);
+    expect(unpublishError?.status).toBe(404);
+    expect(deleteError?.status).toBe(404);
+    expect((await getPlugin(pluginId)).data.status).toBe(PluginStatus.Published);
+  });
+
+  it('does not let the regular plugin routes mutate a system plugin', async () => {
+    const systemPluginId = 'plgchart';
+    const statusBefore = (await getPlugin(systemPluginId)).data.status;
+
+    const regenerateError = await getError(() =>
+      axios.post(`/plugin/${systemPluginId}/regenerate-secret`)
+    );
+    const unpublishError = await getError(() => axios.patch(`/plugin/${systemPluginId}/unpublish`));
+    const deleteError = await getError(() => axios.delete(`/plugin/${systemPluginId}`));
+
+    expect(regenerateError?.status).toBe(404);
+    expect(unpublishError?.status).toBe(404);
+    expect(deleteError?.status).toBe(404);
+    expect((await getPlugin(systemPluginId)).data.status).toBe(statusBefore);
+  });
+
   it('/api/plugin/{pluginId} (PUT)', async () => {
     const res = await createPlugin(mockPlugin);
     const updatePluginRo = {
@@ -95,7 +138,7 @@ describe('PluginController', () => {
       description: 'updated',
       detailDesc: 'updated',
       helpUrl: 'https://updated.com',
-      logo: '/plugin/updated',
+      logo: 'https://updated.com/plugin/updated',
       positions: [PluginPosition.Dashboard],
       i18n: {
         en: {
@@ -111,7 +154,7 @@ describe('PluginController', () => {
     expect(putRes.data.description).toBe(updatePluginRo.description);
     expect(putRes.data.detailDesc).toBe(updatePluginRo.detailDesc);
     expect(putRes.data.helpUrl).toBe(updatePluginRo.helpUrl);
-    expect(putRes.data.logo).toEqual(expect.stringContaining(updatePluginRo.logo));
+    expect(putRes.data.logo).toEqual(expect.stringContaining('plugin/updated'));
     expect(putRes.data.i18n).toEqual(updatePluginRo.i18n);
   });
 
@@ -131,16 +174,32 @@ describe('PluginController', () => {
     expect(getRes.data.status).toBe(PluginStatus.Published);
   });
 
-  it('/api/admin/plugin/center/list (GET)', async () => {
+  it('/api/plugin/center/list (GET)', async () => {
+    const preList = await getPluginCenterList();
     const res = await createPlugin(mockPlugin);
-    await submitPlugin(res.data.id);
-    await publishPlugin(res.data.id);
-    const getRes = await getPluginCenterList();
+    const postList = await getPluginCenterList();
     await deletePlugin(res.data.id);
+    expect(postList.data).toHaveLength(preList.data.length + 1);
+    expect(
+      postList.data.find((p) => p.status === PluginStatus.Developing && p.id === res.data.id)
+    ).not.toBeUndefined();
+    expect(getPluginCenterListVoSchema.safeParse(preList.data).success).toBe(true);
+  });
 
-    expect(getRes.data).toHaveLength(3);
-    const plugin = getRes.data.find((p) => p.id === res.data.id);
-    expect(plugin).not.toBeUndefined();
-    expect(getPluginCenterListVoSchema.safeParse(getRes.data).success).toBe(true);
+  it('/api/plugin/center/list (GET) - 404', async () => {
+    const preList = await getPluginCenterList(mockPlugin.positions);
+    const res = await createPlugin(mockPlugin);
+    const newUserAxios = await createNewUserAxios({
+      email: 'plugin-center-list@test.com',
+      password: '12345678',
+    });
+    const plugins = await newUserAxios.get<IGetPluginCenterListVo>(PLUGIN_CENTER_GET_LIST, {
+      params: {
+        positions: JSON.stringify(mockPlugin.positions),
+      },
+    });
+    await deletePlugin(res.data.id);
+    expect(plugins.data).toHaveLength(preList.data.length - 1);
+    expect(plugins.data.some((p) => p.id === res.data.id)).toBe(false);
   });
 });

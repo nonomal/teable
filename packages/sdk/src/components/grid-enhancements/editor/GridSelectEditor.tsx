@@ -2,15 +2,16 @@ import type {
   ISelectFieldOptions,
   ISingleSelectCellValue,
   IMultipleSelectCellValue,
-  ISelectFieldChoice,
 } from '@teable/core';
-import { FieldType, ColorUtils } from '@teable/core';
+import { FieldType } from '@teable/core';
+import { useTheme } from '@teable/next-themes';
+import { temporaryPaste } from '@teable/openapi';
 import type { ForwardRefRenderFunction } from 'react';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
-import colors from 'tailwindcss/colors';
-import { useTableId } from '../../../hooks';
+import { useTranslation } from '../../../context/app/i18n';
+import { useTableId, useTablePermission } from '../../../hooks';
 import type { MultipleSelectField, SingleSelectField } from '../../../model';
-import { Field } from '../../../model';
+import { ensureSelectChoice, getSelectColorPairs } from '../../../utils';
 import { SelectEditorMain } from '../../editor';
 import type { IEditorRef } from '../../editor/type';
 import type { IEditorProps } from '../../grid/components';
@@ -21,8 +22,17 @@ const GridSelectEditorBase: ForwardRefRenderFunction<
   IEditorRef<string | string[] | undefined>,
   IWrapperEditorProps & IEditorProps
 > = (props, ref) => {
-  const { field, record, rect, style, isEditing, setEditing } = props;
+  const { field, record, rect, style, isEditing, initialSearch, setEditing } = props;
+  const { t } = useTranslation();
+  const { resolvedTheme } = useTheme();
   const tableId = useTableId();
+  const permission = useTablePermission();
+  // Creating a new option modifies the field's schema (choices list), so it
+  // requires field|update — record|update alone (e.g. share-edit) is not
+  // enough. We fold this into preventAutoNewOptions so the editor's existing
+  // "no new options" semantics carry the gate (instead of conditionally
+  // swallowing the callback).
+  const canAddOption = Boolean(permission['field|update']);
   const defaultFocusRef = useRef<HTMLInputElement | null>(null);
   const editorRef = useRef<IEditorRef<string | string[] | undefined>>(null);
   const {
@@ -56,15 +66,15 @@ const GridSelectEditorBase: ForwardRefRenderFunction<
     return choices.map(({ name, color }) => ({
       label: name,
       value: name,
-      color:
-        displayChoiceMap[name]?.color ??
-        (ColorUtils.shouldUseLightTextOnColor(color) ? colors.white : colors.black),
-      backgroundColor: displayChoiceMap[name]?.backgroundColor ?? ColorUtils.getHexForColor(color),
+      sourceColor: color,
+      ...(resolvedTheme === 'dark'
+        ? getSelectColorPairs(color, resolvedTheme)
+        : displayChoiceMap[name] ?? getSelectColorPairs(color, resolvedTheme)),
     }));
-  }, [options, displayChoiceMap]);
+  }, [options, displayChoiceMap, resolvedTheme]);
 
   const onChange = (value?: string[] | string) => {
-    record.updateCell(fieldId, isMultiple && value?.length === 0 ? null : value);
+    record.updateCell(fieldId, isMultiple && value?.length === 0 ? null : value, { t });
     if (!isMultiple) setTimeout(() => setEditing?.(false));
   };
 
@@ -72,21 +82,21 @@ const GridSelectEditorBase: ForwardRefRenderFunction<
     async (name: string) => {
       if (!tableId) return;
 
-      const { choices = [] } = options as ISelectFieldOptions;
-      const existColors = choices.map((v) => v.color);
-      const choice = {
-        name,
-        color: ColorUtils.randomColor(existColors)[0],
-      } as ISelectFieldChoice;
-
-      const newChoices = [...choices, choice];
-
-      await Field.convertField(tableId, fieldId, {
-        type: fieldType,
-        options: { ...options, choices: newChoices },
+      await temporaryPaste(tableId, {
+        content: name,
+        projection: [fieldId],
+        ranges: [
+          [0, 0],
+          [0, 0],
+        ],
       });
+
+      // temporaryPaste typecast creates the choice server-side, but the response
+      // does not include updated field options. Append locally so the immediate
+      // updateCell/render path can validate the new name before ShareDB catches up.
+      ensureSelectChoice(options as ISelectFieldOptions, name);
     },
-    [tableId, fieldType, fieldId, options]
+    [tableId, fieldId, options]
   );
 
   return (
@@ -102,7 +112,11 @@ const GridSelectEditorBase: ForwardRefRenderFunction<
           className="absolute rounded-sm border p-2 shadow-sm"
           value={cellValue === null ? undefined : cellValue}
           isMultiple={isMultiple}
+          preventAutoNewOptions={
+            (options as ISelectFieldOptions)?.preventAutoNewOptions || !canAddOption
+          }
           options={selectOptions}
+          initialSearch={initialSearch}
           onChange={onChange}
           onOptionAdd={onOptionAdd}
         />

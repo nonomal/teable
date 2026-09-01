@@ -1,11 +1,13 @@
 import type { ReactNode } from 'react';
 import { useState } from 'react';
+import { LinkListType } from '../../components/editor/link/interface';
 import { LinkFilterContext } from './LinkFilterContext';
 
 export interface ILinkFilterProviderProps {
   filterLinkCellCandidate?: [string, string] | string;
   filterLinkCellSelected?: [string, string] | string;
   selectedRecordIds?: string[];
+  listType?: LinkListType;
   children?: ReactNode;
 }
 
@@ -19,13 +21,17 @@ export const LinkFilterProvider: React.FC<ILinkFilterProviderProps> = (props) =>
   const [selectedRecordIds, setSelectedRecordIds] = useState<string[] | undefined>(
     props.selectedRecordIds
   );
+  const [listType, setListType] = useState<LinkListType>(props.listType ?? LinkListType.All);
+  const isSelectedList = listType === LinkListType.Selected;
+  const isAllList = listType === LinkListType.All;
 
   return (
     <LinkFilterContext.Provider
       value={{
-        selectedRecordIds,
-        filterLinkCellSelected,
-        filterLinkCellCandidate,
+        selectedRecordIds: isSelectedList ? selectedRecordIds : undefined,
+        filterLinkCellSelected: isSelectedList ? filterLinkCellSelected : undefined,
+        filterLinkCellCandidate: isAllList ? filterLinkCellCandidate : undefined,
+        listType,
         setSelectedRecordIds,
         setLinkCellSelected: (value: string[] | string) => {
           setLinkCellCandidate(undefined);
@@ -38,6 +44,7 @@ export const LinkFilterProvider: React.FC<ILinkFilterProviderProps> = (props) =>
           );
         },
         setLinkCellCandidate: (value: string[] | string) => {
+          setLinkCellSelected(undefined);
           setLinkCellCandidate(
             Array.isArray(value)
               ? value.length === 2
@@ -45,7 +52,14 @@ export const LinkFilterProvider: React.FC<ILinkFilterProviderProps> = (props) =>
                 : (value[0] as string)
               : (value as string)
           );
-          setLinkCellSelected(undefined);
+        },
+        setListType: (value: LinkListType) => {
+          setListType(value);
+          if (value === LinkListType.Selected) {
+            setLinkCellCandidate(undefined);
+          } else {
+            setLinkCellSelected(undefined);
+          }
         },
       }}
     >

@@ -23,7 +23,7 @@ export enum CommentPatchType {
 }
 
 export const baseCommentContentSchema = z.object({
-  type: z.nativeEnum(CommentNodeType),
+  type: z.enum(CommentNodeType),
   value: z.unknown().optional(),
 });
 
@@ -35,6 +35,8 @@ export const textCommentContentSchema = baseCommentContentSchema.extend({
 export const mentionCommentContentSchema = baseCommentContentSchema.extend({
   type: z.literal(CommentNodeType.Mention),
   value: z.string(),
+  name: z.string().optional(),
+  avatar: z.string().optional(),
 });
 
 export const linkCommentContentSchema = baseCommentContentSchema.extend({
@@ -47,6 +49,7 @@ export const imageCommentContentSchema = baseCommentContentSchema.extend({
   type: z.literal(CommentNodeType.Img),
   path: z.string(),
   width: z.number().optional(),
+  url: z.string().optional(),
 });
 
 export const paragraphCommentContentSchema = baseCommentContentSchema.extend({
@@ -78,8 +81,8 @@ export type ICreateCommentRo = z.infer<typeof createCommentRoSchema>;
 export type IUpdateCommentRo = z.infer<typeof updateCommentRoSchema>;
 
 export const commentPatchDataSchema = z.object({
-  type: z.nativeEnum(CommentPatchType),
-  data: z.record(z.unknown()),
+  type: z.enum(CommentPatchType),
+  data: z.record(z.string(), z.unknown()),
 });
 
 export type ICommentPatchData = z.infer<typeof commentPatchDataSchema>;

@@ -3,6 +3,7 @@ import { Component, Database, X } from '@teable/icons';
 import type { IGetBaseVo, IGetSpaceVo } from '@teable/openapi';
 import { getBaseAll, getSpaceList } from '@teable/openapi';
 import { ReactQueryKeys } from '@teable/sdk/config';
+import { useContentDir } from '@teable/sdk/hooks';
 import { Button } from '@teable/ui-lib/shadcn';
 import { isEmpty } from 'lodash';
 import { useTranslation } from 'next-i18next';
@@ -10,15 +11,19 @@ import { useMemo } from 'react';
 import { Emoji } from '@/features/app/components/emoji/Emoji';
 
 interface IAccessListProps {
-  baseIds: string[];
-  spaceIds: string[];
+  baseIds?: string[];
+  spaceIds?: string[];
+  hasFullAccess?: boolean;
+  onDeleteFullAccess: () => void;
   onDeleteBaseId: (baseId: string) => void;
   onDeleteSpaceId: (spaceId: string) => void;
 }
 
 export const AccessList = (props: IAccessListProps) => {
-  const { baseIds, spaceIds, onDeleteBaseId, onDeleteSpaceId } = props;
+  const { baseIds, spaceIds, hasFullAccess, onDeleteBaseId, onDeleteSpaceId, onDeleteFullAccess } =
+    props;
   const { t } = useTranslation('token');
+  const contentDir = useContentDir();
 
   const { data: spaceList } = useQuery({
     queryKey: ReactQueryKeys.spaceList(),
@@ -51,13 +56,16 @@ export const AccessList = (props: IAccessListProps) => {
     const displaySpaceMap: Record<string, IGetSpaceVo> = {};
     const displayBaseMap: Record<string, IGetBaseVo[]> = {};
     const allDisplaySpaceIds = new Set<string>();
-    spaceIds.forEach((spaceId) => {
+    spaceIds?.forEach((spaceId) => {
       displaySpaceMap[spaceId] = spaceMap[spaceId];
       allDisplaySpaceIds.add(spaceId);
     });
 
-    baseIds.forEach((baseId) => {
+    baseIds?.forEach((baseId) => {
       const base = baseMap[baseId];
+      if (!base) {
+        return;
+      }
       const cur = displayBaseMap[base.spaceId];
       allDisplaySpaceIds.add(base.spaceId);
       displayBaseMap[base.spaceId] = cur ? [...cur, base] : [base];
@@ -67,42 +75,66 @@ export const AccessList = (props: IAccessListProps) => {
   }, [spaceIds, baseIds, spaceMap, baseMap]);
 
   return (
-    <div className="py-3 pl-1 text-sm">
+    <div className="space-y-3 text-sm">
+      {hasFullAccess && (
+        <div className="space-y-1">
+          <div className="text-xs text-muted-foreground">{t('accessSelect.fullAccess.title')}</div>
+
+          <div className="flex h-8 items-center justify-between hover:bg-accent">
+            <div className="flex items-center gap-2">
+              <Component className="size-4 shrink-0" />
+              {t('accessSelect.fullAccess.description')}
+            </div>
+            <Button variant={'ghost'} size={'icon-xs'} onClick={() => onDeleteFullAccess()}>
+              <X className="size-4 shrink-0" />
+            </Button>
+          </div>
+        </div>
+      )}
       {allDisplaySpaceIds.map((spaceId) => {
         const space = spaceMap[spaceId];
         const displaySpace = displaySpaceMap[spaceId];
         const displayBases = displayBaseMap[spaceId];
         return (
           <div key={spaceId} className="space-y-1">
-            <div className="text-xs text-muted-foreground">{space.name}</div>
+            <div className="ps-2 text-xs font-medium text-muted-foreground">{space?.name}</div>
             <div>
               {displaySpace && (
-                <div className="flex h-8 items-center justify-between">
+                <div className="flex h-8 items-center justify-between rounded-md pe-1 ps-2 hover:bg-accent">
                   <div className="flex items-center gap-2">
                     <Component className="size-4 shrink-0" />
                     {t('allSpace')}
                   </div>
                   <Button
                     variant={'ghost'}
-                    size={'sm'}
+                    size={'icon-xs'}
+                    className="bg-transparent text-muted-foreground hover:text-foreground"
                     onClick={() => onDeleteSpaceId(displaySpace.id)}
                   >
-                    <X />
+                    <X className="size-4 shrink-0" />
                   </Button>
                 </div>
               )}
               {displayBases?.map((base) => (
-                <div key={base.id} className="flex h-8 items-center justify-between">
+                <div
+                  key={base.id}
+                  className="flex h-8 items-center justify-between rounded-md pe-1 ps-2 hover:bg-accent"
+                >
                   <div className="flex items-center gap-2">
                     {base.icon ? (
                       <Emoji className="w-4 shrink-0" emoji={base.icon} size={16} />
                     ) : (
                       <Database className="size-4 shrink-0" />
                     )}
-                    {base.name}
+                    <span dir={contentDir}>{base.name}</span>
                   </div>
-                  <Button variant={'ghost'} size={'sm'} onClick={() => onDeleteBaseId(base.id)}>
-                    <X />
+                  <Button
+                    variant={'ghost'}
+                    className="bg-transparent text-muted-foreground hover:text-foreground"
+                    size={'icon-xs'}
+                    onClick={() => onDeleteBaseId(base.id)}
+                  >
+                    <X className="size-4 shrink-0" />
                   </Button>
                 </div>
               ))}

@@ -1,28 +1,17 @@
-import { ColorUtils, SelectFieldCore } from '@teable/core';
-import { keyBy } from 'lodash';
-import colors from 'tailwindcss/colors';
-
-export interface ISelectFieldDisplayChoice {
-  id: string;
-  name: string;
-  color: string;
-  backgroundColor: string;
-}
+import { SelectFieldCore } from '@teable/core';
+import type { ISelectFieldDisplayChoice } from '../../../utils/select-color';
+import { getDisplayChoiceMap } from '../../../utils/select-color';
 
 export abstract class SelectFieldSdk extends SelectFieldCore {
   private _choiceMap: Record<string, ISelectFieldDisplayChoice> = {};
+  private _choiceMapKey = '';
 
   get displayChoiceMap() {
-    if (Object.keys(this._choiceMap).length === 0) {
-      const displayedChoices = this.options.choices.map(({ id, name, color }) => {
-        return {
-          id,
-          name,
-          color: ColorUtils.shouldUseLightTextOnColor(color) ? colors.white : colors.black,
-          backgroundColor: ColorUtils.getHexForColor(color),
-        };
-      });
-      this._choiceMap = keyBy(displayedChoices, 'name');
+    const choices = this.options?.choices ?? [];
+    const choicesKey = JSON.stringify(choices.map(({ id, name, color }) => [id, name, color]));
+    if (this._choiceMapKey !== choicesKey) {
+      this._choiceMap = getDisplayChoiceMap(choices);
+      this._choiceMapKey = choicesKey;
     }
     return this._choiceMap;
   }

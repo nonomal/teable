@@ -36,6 +36,7 @@ export enum SelectionRegionType {
 export enum RegionType {
   Cell = 'Cell',
   ActiveCell = 'ActiveCell',
+  CellValue = 'CellValue',
   AppendRow = 'AppendRow',
   AppendColumn = 'AppendColumn',
   ColumnHeader = 'ColumnHeader',
@@ -43,12 +44,14 @@ export enum RegionType {
   ColumnStatistic = 'ColumnStatistic',
   ColumnHeaderMenu = 'ColumnHeaderMenu',
   ColumnPrimaryIcon = 'ColumnPrimaryIcon',
+  ColumnIcon = 'ColumnIcon',
   ColumnDescription = 'ColumnDescription',
   ColumnResizeHandler = 'ColumnResizeHandler',
   ColumnFreezeHandler = 'ColumnFreezeHandler',
   RowHeaderDragHandler = 'RowHeaderDragHandler',
   RowHeaderExpandHandler = 'RowHeaderExpandHandler',
   RowHeaderCheckbox = 'RowHeaderCheckbox',
+  RowGroupControl = 'RowGroupControl',
   RowGroupHeader = 'RowGroupHeader',
   RowCountLabel = 'RowCountLabel',
   RowHeader = 'RowHeader',
@@ -127,6 +130,7 @@ export enum MouseButtonType {
 }
 
 export enum RowControlType {
+  Spacer = 'Spacer',
   Drag = 'Drag',
   Expand = 'Expand',
   Checkbox = 'Checkbox',
@@ -231,4 +235,17 @@ export type ILinearRow =
 export interface IGroupCollection {
   groupColumns: IGridColumn[];
   getGroupCell: (cellValue: unknown, depth: number) => ICell;
+}
+
+export interface IColumnLoading {
+  index: number;
+  progress: number;
+  onCancel?: () => void;
+}
+
+export interface ICellError {
+  cellItem: ICellItem;
+  errorMsg: string;
+  onRetry?: () => void;
+  onDismiss?: () => void;
 }

@@ -1,7 +1,6 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
-import { viewVoSchema } from '@teable/core';
 import type { IAggregationVo } from '../aggregation';
-import { aggregationRoSchema } from '../aggregation';
+import { aggregationRoSchema, aggregationVoSchema } from '../aggregation';
 import { axios } from '../axios';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
@@ -9,7 +8,10 @@ import { z } from '../zod';
 export const SHARE_VIEW_AGGREGATIONS_LIST = '/share/{shareId}/view/aggregations';
 
 export const shareViewAggregationsRoSchema = aggregationRoSchema.omit({
+  // viewId is bound by the shareId. ignoreViewQuery is not forwarded by the handler
+  // today, but omit it too so the share endpoint can never drop the view scope.
   viewId: true,
+  ignoreViewQuery: true,
 });
 
 export type IShareViewAggregationsRo = z.infer<typeof shareViewAggregationsRoSchema>;
@@ -29,7 +31,7 @@ export const ShareViewAggregationsRoute: RouteConfig = registerRoute({
       description: 'Returns aggregations list of share view.',
       content: {
         'application/json': {
-          schema: z.array(viewVoSchema),
+          schema: aggregationVoSchema,
         },
       },
     },

@@ -11,6 +11,10 @@ import {
   IDashboardInstallPluginRo,
   dashboardPluginUpdateStorageRoSchema,
   IDashboardPluginUpdateStorageRo,
+  duplicateDashboardRoSchema,
+  IDuplicateDashboardRo,
+  duplicateDashboardInstalledPluginRoSchema,
+  IDuplicateDashboardInstalledPluginRo,
 } from '@teable/openapi';
 import type {
   ICreateDashboardVo,
@@ -22,11 +26,15 @@ import type {
   IDashboardPluginUpdateStorageVo,
   IGetDashboardInstallPluginVo,
 } from '@teable/openapi';
+import { EmitControllerEvent } from '../../event-emitter/decorators/emit-controller-event.decorator';
+import { Events } from '../../event-emitter/events';
 import { ZodValidationPipe } from '../../zod.validation.pipe';
+import { AllowAnonymous } from '../auth/decorators/allow-anonymous.decorator';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { DashboardService } from './dashboard.service';
 
 @Controller('api/base/:baseId/dashboard')
+@AllowAnonymous()
 export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
 
@@ -47,6 +55,7 @@ export class DashboardController {
 
   @Post()
   @Permissions('base|update')
+  @EmitControllerEvent(Events.DASHBOARD_CREATE)
   createDashboard(
     @Param('baseId') baseId: string,
     @Body(new ZodValidationPipe(createDashboardRoSchema)) ro: ICreateDashboardRo
@@ -56,6 +65,7 @@ export class DashboardController {
 
   @Patch(':id/rename')
   @Permissions('base|update')
+  @EmitControllerEvent(Events.DASHBOARD_UPDATE)
   updateDashboard(
     @Param('baseId') baseId: string,
     @Param('id') id: string,
@@ -76,8 +86,38 @@ export class DashboardController {
 
   @Delete(':id')
   @Permissions('base|update')
+  @EmitControllerEvent(Events.DASHBOARD_DELETE)
   deleteDashboard(@Param('baseId') baseId: string, @Param('id') id: string): Promise<void> {
     return this.dashboardService.deleteDashboard(baseId, id);
+  }
+
+  @Post(':id/duplicate')
+  @Permissions('base|update')
+  @EmitControllerEvent(Events.DASHBOARD_CREATE)
+  duplicateDashboard(
+    @Param('baseId') baseId: string,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(duplicateDashboardRoSchema))
+    duplicateDashboardRo: IDuplicateDashboardRo
+  ): Promise<{ id: string; name: string }> {
+    return this.dashboardService.duplicateDashboard(baseId, id, duplicateDashboardRo);
+  }
+
+  @Post(':id/plugin/:pluginInstallId/duplicate')
+  @Permissions('base|update')
+  duplicateDashboardInstalledPlugin(
+    @Param('baseId') baseId: string,
+    @Param('id') id: string,
+    @Param('pluginInstallId') pluginInstallId: string,
+    @Body(new ZodValidationPipe(duplicateDashboardInstalledPluginRoSchema))
+    duplicateDashboardInstalledPluginRo: IDuplicateDashboardInstalledPluginRo
+  ): Promise<{ id: string; name: string }> {
+    return this.dashboardService.duplicateDashboardInstalledPlugin(
+      baseId,
+      id,
+      pluginInstallId,
+      duplicateDashboardInstalledPluginRo
+    );
   }
 
   @Post(':id/plugin')

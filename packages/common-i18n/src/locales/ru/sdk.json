@@ -1,12 +1,13 @@
 {
   "common": {
-    "comingSoon": "Скоро будет",
     "empty": "Пусто",
     "noRecords": "Нет доступных записей",
     "unnamedRecord": "Безымянная запись",
+    "recordDeleted": "Запись удалена",
     "untitled": "Без названия",
     "cancel": "Отмена",
     "confirm": "Подтвердить",
+    "clear": "Очистить",
     "back": "Назад",
     "done": "Готово",
     "create": "Создать",
@@ -14,6 +15,7 @@
       "placeholder": "Поиск...",
       "empty": "Результаты не найдены"
     },
+    "readOnlyTip": "Этот вид заблокирован. Вы можете включить <button>личный режим</button> для редактирования параметров вида, и изменения будут действовать только для вас.",
     "selectPlaceHolder": "Выберите...",
     "loading": "Загрузка...",
     "loadMore": "Загрузить больше",
@@ -21,11 +23,33 @@
     "rowCount": "{{count}} записей",
     "summary": "Итог",
     "summaryTip": "Наведите, чтобы выбрать сводку",
-    "actions": "Действия"
+    "actions": "Действия",
+    "remove": "Удалить",
+    "runStatus": {
+      "success": "{{name}} успешно",
+      "failed": "{{name}} не удалось",
+      "running": "{{name}} в процессе"
+    },
+    "resetSuccess": "Сброс успешно",
+    "click": "Нажмите",
+    "clickedCount": "{{label}}: Нажато {{text}} раз",
+    "atLeastOne": "Сохраните хотя бы один {{noun}}",
+    "close": "Закрыть",
+    "selectField": "Выберите поле"
+  },
+  "notification": {
+    "title": "Уведомление"
+  },
+  "aiError": {
+    "title": "Не удалось выполнить генерацию ИИ",
+    "retry": "Повторить",
+    "dismiss": "Закрыть"
   },
   "preview": {
     "previewFileLimit": "Лимит размера файла для предварительного просмотра: {{size}} МБ, пожалуйста, скачайте файл для просмотра.",
-    "loadFileError": "Не удалось загрузить файл"
+    "loadFileError": "Не удалось загрузить файл",
+    "previousAttachment": "Предыдущая",
+    "nextAttachment": "Следующая"
   },
   "undoRedo": {
     "undo": "Отменить",
@@ -42,52 +66,112 @@
   "editor": {
     "attachment": {
       "uploadDragOver": "Отпустите, чтобы загрузить файл",
-      "uploadDragDefault": "Вставьте или перетащите файл для загрузки сюда"
+      "uploadBaseTextPrefix": "Click to upload ",
+      "uploadBaseText": "or paste or drag and drop here",
+      "uploadDragDefault": "Вставьте или перетащите файл для загрузки сюда",
+      "upload": "загрузить",
+      "downloadAll": "Скачать все",
+      "downloadSuccess": "Загрузка завершена",
+      "downloadFailed": "Не удалось скачать",
+      "downloadCancelled": "Загрузка отменена",
+      "requireHttps": "Массовая загрузка требует HTTPS. Откройте через HTTPS или localhost"
     },
     "date": {
       "placeholder": "Выберите дату",
-      "today": "Сегодня"
+      "today": "Сегодня",
+      "rangePlaceholder": "Выберите диапазон дат",
+      "rangeSelected": "Выбрано",
+      "invalidTimeRange": "Время окончания должно быть позже времени начала",
+      "from": "С",
+      "to": "По"
     },
     "formula": {
       "title": "Редактор формул",
       "guideSyntax": "Синтаксис",
       "guideExample": "Пример",
       "helperExample": "Пример: ",
-      "fieldValue": "Возвращает значение для поля {{fieldName}}."
+      "fieldValue": "Возвращает значение для поля {{fieldName}}.",
+      "placeholder": "Введите формулу",
+      "placeholderForAIPrompt": "Опишите формулу, которую вы хотите сгенерировать",
+      "editExpression": "Редактировать формулу",
+      "generateExpressionByAI": "Сгенерировать формулу с помощью AI",
+      "inputPrompt": "Введите инструкцию",
+      "generateExpression": "Сгенерированная формула",
+      "generatingByAI": "Сгенерирование формулы с помощью AI...",
+      "generatedExpressionTips": "После генерации, нажмите на кнопку Применить, чтобы вставить формулу быстро",
+      "action": {
+        "generating": "Сгенерирование...",
+        "generate": "Сгенерировать",
+        "apply": "Применить"
+      },
+      "expressionRequired": "Выражение обязательно"
     },
     "link": {
       "placeholder": "Выберите записи для ссылки",
       "searchPlaceholder": "Поиск записей",
+      "globalSearch": "Глобальный поиск",
+      "fieldSearch": "Поиск по полю",
+      "maxFieldTips": "Превышено максимальное количество {{count}} полей, лишние поля будут проигнорированы",
       "create": "Добавить запись",
       "selectRecord": "Выбрать запись",
-      "unselected": "Не выбрано",
+      "all": "Все",
       "selected": "Выбрано",
-      "expandRecordError": "Нет доступа для просмотра этой записи.",
-      "goToForeignTable": "Перейти к связанной таблице"
+      "alreadyOpen": "Эта запись уже открыта.",
+      "linkedTo": "Связано с",
+      "foreignTableIdRequired": "Внешняя таблица обязательна",
+      "linkFieldIdRequired": "Поле связи обязательно",
+      "selectTooManyRecords": "Выбранные записи не должны превышать {{maxCount}}",
+      "rangeSelectFailed": "Не удалось выбрать записи в диапазоне"
     },
     "user": {
       "searchPlaceholder": "Найдите пользователей по имени",
       "notify": "Уведомить пользователей, когда они будут выбраны"
     },
     "select": {
-      "addOption": "Добавить вариант '{{option}}'"
+      "addOption": "Добавить вариант '{{option}}'",
+      "choicesNameRequired": "Имя выбора не может быть пустым"
+    },
+    "lookup": {
+      "lookupFieldIdRequired": "Поле поиска обязательно",
+      "lookupOptionsNotAllowed": "Опции поиска не разрешены, когда атрибут isLookup истинный или тип поля rollup.",
+      "lookupOptionsRequired": "Опции поиска обязательны"
+    },
+    "rollup": {
+      "expressionRequired": "Выражение обязательно"
+    },
+    "conditionalRollup": {
+      "filterRequired": "Фильтр должен содержать как минимум одно условие"
+    },
+    "conditionalLookup": {
+      "filterRequired": "Для условного поиска требуется как минимум одно условие фильтра"
+    },
+    "aiConfig": {
+      "modelKeyRequired": "Модель обязательна",
+      "typeNotSupported": "Неподдерживаемый тип AI",
+      "sourceFieldIdRequired": "Исходное поле обязательно",
+      "targetLanguageRequired": "Целевой язык обязателен",
+      "promptRequired": "Запрос обязателен"
+    },
+    "error": {
+      "refineOptionsError": "Ошибка парсинга опций поля {{message}}",
+      "optionsRequired": "Опции поля обязательны"
     }
   },
   "filter": {
     "label": "Фильтр",
     "displayLabel": "Фильтр по ",
+    "displayLabel_one": "Фильтр по {{fieldName}} и {{count}} другим полям",
+    "displayLabel_few": "Фильтр по {{fieldName}} и {{count}} другим полям",
+    "displayLabel_many": "Фильтр по {{fieldName}} и {{count}} другим полям",
     "displayLabel_other": "Фильтр по {{fieldName}} и {{count}} другим полям",
     "addCondition": "Добавить условие",
     "addConditionGroup": "Добавить группу условий",
     "nestedLimitTip": "Условия фильтра могут быть вложены не более чем на {{depth}} уровней",
     "linkInputPlaceholder": "Введите значение",
-    "groupDescription": "Любое из следующих условий верно…",
     "currentUser": "Я (текущий пользователь)",
-    "tips": {
-      "scope": "В этом виде показывать записи"
-    },
     "invalidateSelected": "Неверное значение",
     "invalidateSelectedTips": "Выбранное значение было удалено, выберите другое",
+    "invalidConditionTip": "Это условие фильтра недопустимо и будет проигнорировано. Измените значение.",
     "default": {
       "empty": "Фильтры не применены",
       "placeholder": "Введите значение"
@@ -95,7 +179,9 @@
     "conjunction": {
       "and": "и",
       "or": "или",
-      "where": "где"
+      "where": "где",
+      "meetingAll": "Соответствовать всем условиям",
+      "meetingAny": "Соответствовать любому условию"
     },
     "operator": {
       "is": "является",
@@ -128,6 +214,10 @@
         "isLessEqual": "≤"
       }
     },
+    "conditionalRollup": {
+      "switchToField": "Use field value",
+      "switchToValue": "Use manual value"
+    },
     "component": {
       "date": {
         "today": "сегодня",
@@ -140,6 +230,18 @@
         "daysAgo": "дней назад",
         "daysFromNow": "дней вперед",
         "exactDate": "точная дата",
+        "exactDateTime": "точные дата и время",
+        "exactFormatDate": "точная дата (форматированная)",
+        "dateRange": "произвольный диапазон",
+        "currentWeek": "current week",
+        "currentMonth": "current month",
+        "currentYear": "current year",
+        "lastWeek": "last week",
+        "lastMonth": "last month",
+        "lastYear": "last year",
+        "nextWeekPeriod": "next week",
+        "nextMonthPeriod": "next month",
+        "nextYearPeriod": "next year",
         "pastWeek": "прошлая неделя",
         "pastMonth": "прошлый месяц",
         "pastYear": "прошлый год",
@@ -149,7 +251,11 @@
         "pastNumberOfDays": "прошлое количество дней",
         "nextNumberOfDays": "следующее количество дней"
       }
-    }
+    },
+    "selectOperator": "Выберите оператор",
+    "selectConjunction": "Выберите связку",
+    "selectDateMode": "Выберите способ указания даты",
+    "selectValue": "Выберите значение"
   },
   "color": {
     "label": "Цвет"
@@ -158,55 +264,76 @@
     "short": "низкий",
     "medium": "средний",
     "tall": "высокий",
-    "extraTall": "очень высокий"
+    "extraTall": "очень высокий",
+    "title": "высоты строки"
   },
-  "share": {
-    "title": "Поделиться"
-  },
-  "extensions": {
-    "title": "Расширения"
+  "fieldNameConfig": {
+    "title": "имени поля",
+    "displayLines": "{{count}} строк"
   },
   "hidden": {
     "label": "Скрытые поля",
-    "configLabel_one": "{{count}} скрытое поле",
+    "configLabel_one": "{{count}} скрытых поля",
+    "configLabel_few": "{{count}} скрытых поля",
+    "configLabel_many": "{{count}} скрытых поля",
     "configLabel_other": "{{count}} скрытых поля",
     "configLabel_other_visible": "{{count}} видимых поля",
     "showAll": "Показать все",
     "hideAll": "Скрыть все",
-    "primaryKey": "Основное поле: Идентифицирует записи\nнельзя скрыть или удалить, видно в связанных записях."
+    "primaryKey": "Основное поле: Идентифицирует записи\nнельзя скрыть или удалить, видно в связанных записях.",
+    "notInCurrentView": "Поле «{{fieldName}}» не отображается в текущем представлении, поэтому перейти к нему нельзя"
   },
   "expandRecord": {
     "copy": "Копировать в буфер обмена",
+    "previousRecord": "Предыдущая",
+    "nextRecord": "Следующая",
+    "duplicateRecord": "Duplicate record",
     "copyRecordUrl": "Копировать URL записи",
     "deleteRecord": "Удалить запись",
+    "addRecordComment": "Добавить комментарий",
+    "viewRecordHistory": "Посмотреть историю записи",
     "recordHistory": {
       "hiddenRecordHistory": "Скрыть историю записи",
       "showRecordHistory": "Показать историю записи",
-      "createdTime": "Время создания",
-      "createdBy": "Создано",
+      "createdTime": "Время изменения",
+      "createdBy": "Изменено",
       "before": "До",
       "after": "После",
+      "buttonClicked": "Кнопка нажата",
+      "filterTime": "Диапазон времени",
+      "allFields": "Все поля",
+      "allUsers": "Все пользователи",
+      "clearFilter": "Очистить фильтры",
       "viewRecord": "Просмотреть запись"
     },
     "showHiddenFields": "Показать {{count}} скрытых поля",
-    "hideHiddenFields": "Скрыть {{count}} скрытых поля"
+    "hideHiddenFields": "Скрыть {{count}} скрытых поля",
+    "showMore": "Show more",
+    "showLess": "Show less",
+    "recordFrom": "Запись из"
   },
   "sort": {
     "label": "Сортировка",
     "displayLabel_one": "Сортировать по {{count}} полю",
+    "displayLabel_few": "Сортировать по {{count}} полям",
+    "displayLabel_many": "Сортировать по {{count}} полям",
     "displayLabel_other": "Сортировать по {{count}} полям",
     "setTips": "Сортировать по",
     "addButton": "Добавить ещё одну сортировку",
     "autoSort": "Автоматически сортировать записи",
     "selectASCLabel": "от первого к последнему",
-    "selectDESCLabel": "от последнего к первому"
+    "selectDESCLabel": "от последнего к первому",
+    "orderTitle": "Выберите порядок сортировки"
   },
   "group": {
     "label": "Группировка",
     "displayLabel_one": "Группировать по {{count}} полю",
+    "displayLabel_few": "Группировать по {{count}} полям",
+    "displayLabel_many": "Группировать по {{count}} полям",
     "displayLabel_other": "Группировать по {{count}} полям",
     "setTips": "Группировать по",
-    "addButton": "Добавить подгруппу"
+    "addButton": "Добавить подгруппу",
+    "maxLimitTip": "Можно группировать не более чем по {{count}} полям"
   },
   "field": {
     "title": {
@@ -223,13 +350,49 @@
       "attachment": "Вложение",
       "checkbox": "Флажок",
       "rollup": "Сворачивание",
+      "conditionalRollup": "Условное сворачивание",
       "user": "Пользователь",
       "rating": "Рейтинг",
       "autoNumber": "Автонумерация",
       "lookup": "Поиск",
+      "conditionalLookup": "Условный поиск",
       "button": "Кнопка",
       "createdBy": "Создано",
       "lastModifiedBy": "Изменено"
+    },
+    "description": {
+      "singleLineText": "Сохраняйте короткий текст, например имена или заголовки.",
+      "longText": "Записывайте более длинные заметки и описания.",
+      "singleSelect": "Выберите один вариант из списка.",
+      "number": "Ведите учёт числовых значений с форматированием.",
+      "multipleSelect": "Помечайте записи несколькими вариантами.",
+      "link": "Свяжите эту запись с другой таблицей.",
+      "formula": "Вычисляйте значения на основе других полей.",
+      "date": "Фиксируйте даты или время.",
+      "createdTime": "Показывает, когда запись была создана.",
+      "lastModifiedTime": "Показывает время последнего обновления.",
+      "attachment": "Загрузка файлов или генерация изображений с помощью ИИ, поддерживает модели типа GPT Image 2",
+      "checkbox": "Переключайте простое \"да\" или \"нет\".",
+      "rollup": "Сводите связанные записи с помощью формул.",
+      "conditionalRollup": "Сводите данные по заданным условиям.",
+      "user": "Назначайте записи участникам рабочего пространства.",
+      "rating": "Оценивайте элементы настраиваемыми иконками.",
+      "autoNumber": "Присваивайте каждой записи уникальный номер.",
+      "lookup": "Показывайте значения из связанных записей.",
+      "conditionalLookup": "Показывает связанные значения, удовлетворяющие заданным фильтрам.",
+      "button": "Запускайте действия нажатием на кнопку.",
+      "createdBy": "Показывает, кто создал запись.",
+      "lastModifiedBy": "Показывает, кто изменил запись последним."
+    },
+    "link": {
+      "oneWay": "Однонаправленный",
+      "twoWay": "Двунаправленный"
+    },
+    "button": {
+      "confirm": {
+        "title": "Подтверждение действия",
+        "description": "Вы уверены, что хотите выполнить это действие?"
+      }
     }
   },
   "permission": {
@@ -244,11 +407,10 @@
       "baseCreate": "Создать базу",
       "baseDelete": "Удалить базу",
       "baseRead": "Читать базу",
+      "baseReadAll": "Читать все базы",
       "baseUpdate": "Обновить базу",
       "baseInviteEmail": "Пригласить по электронной почте в базу",
       "baseInviteLink": "Пригласить по ссылке в базу",
-      "baseTableImport": "Импортировать данные в базу",
-      "baseTableExport": "Экспортировать данные из базы",
       "baseAuthorityMatrixConfig": "Настроить матрицу полномочий",
       "baseDbConnect": "Подключение к базе данных",
       "tableCreate": "Создать таблицу",
@@ -257,10 +419,16 @@
       "tableUpdate": "Обновить таблицу",
       "tableImport": "Импортировать данные в таблицу",
       "tableExport": "Экспортировать данные из таблицы",
+      "tableTrashRead": "Просмотр корзины таблицы",
+      "tableTrashUpdate": "Обновление корзины таблицы",
+      "tableTrashReset": "Сброс корзины таблицы",
+      "tableArchiveRead": "Просмотр архива таблицы",
+      "tableArchiveManage": "Управление архивом таблицы",
       "viewCreate": "Создать вид",
       "viewDelete": "Удалить вид",
       "viewRead": "Читать вид",
       "viewUpdate": "Обновить вид",
+      "viewShare": "Share view",
       "fieldCreate": "Создать поле",
       "fieldDelete": "Удалить поле",
       "fieldRead": "Читать поле",
@@ -270,13 +438,24 @@
       "recordDelete": "Удалить запись",
       "recordRead": "Читать запись",
       "recordUpdate": "Обновить запись",
+      "recordCopy": "Copy record",
+      "recordArchive": "Архивировать запись",
       "automationCreate": "Создать автоматизацию",
       "automationDelete": "Удалить автоматизацию",
       "automationRead": "Читать автоматизацию",
       "automationUpdate": "Обновить автоматизацию",
+      "appCreate": "Создать приложение",
+      "appDelete": "Удалить приложение",
+      "appRead": "Читать приложение",
+      "appUpdate": "Обновить приложение",
       "userEmailRead": "Читать электронную почту пользователя",
+      "userIntegrations": "Manage user integrations",
       "recordHistoryRead": "Читать историю записей",
-      "baseQuery": "Запрос базы"
+      "baseQuery": "Запрос базы",
+      "instanceRead": "Читать экземпляр",
+      "instanceUpdate": "Обновить экземпляр",
+      "enterpriseRead": "Read enterprise configuration",
+      "enterpriseUpdate": "Update enterprise configuration"
     }
   },
   "noun": {
@@ -287,9 +466,14 @@
     "field": "Поле",
     "record": "Запись",
     "automation": "Автоматизация",
+    "app": "Приложение",
     "user": "Пользователь",
-    "recordHistory": "История записи",
-    "you": "Вы"
+    "recordHistory": "История записей",
+    "you": "Вы",
+    "instance": "Экземпляр",
+    "enterprise": "Предприятие",
+    "history": "История",
+    "global": "Глобальный"
   },
   "formula": {
     "SUM": {
@@ -404,6 +588,14 @@
       "summary": "Заменяет вхождения old_text на new_text. Можно указать индекс для замены конкретного вхождения old_text.",
       "example": "SUBSTITUTE(\"Hello Table\", \"Table\", \"Teable\") => \"Hello Teable\""
     },
+    "TEXTBEFORE": {
+      "summary": "Возвращает текст до разделителя.",
+      "example": "TEXTBEFORE(\"20, 04, 79\", \",\") => \"20\""
+    },
+    "TEXTSPLIT": {
+      "summary": "Разделяет текст по разделителю и возвращает несколько текстовых значений.",
+      "example": "TEXTSPLIT(\"20, 04, 79\", \",\") => [\"20\", \" 04\", \" 79\"]"
+    },
     "LOWER": {
       "summary": "Преобразует строку в нижний регистр.",
       "example": "LOWER(\"Hello Teable\") => \"hello teable\""
@@ -490,7 +682,7 @@
     },
     "WEEKDAY": {
       "summary": "Возвращает день недели в виде числа от 0 до 6 включительно. Можно указать, с какого дня начинать неделю: «Воскресенье» или «Понедельник». По умолчанию неделя начинается с воскресенья.",
-      "example": "WEEKNUM(\"2023-09-08\") => 5"
+      "example": "WEEKDAY(\"2023-09-08\") => 5"
     },
     "DAY": {
       "summary": "Возвращает день месяца в виде числа от 1 до 31.",
@@ -517,8 +709,8 @@
       "example": "TONOW({Date}, \"день\") => 25"
     },
     "DATETIME_DIFF": {
-      "summary": "Возвращает разницу между датами в указанных единицах. По умолчанию — в секундах.",
-      "example": "DATETIME_DIFF(\"2022-08-01\", \"2023-09-08\", \"день\") => 403"
+      "summary": "Возвращает разницу между датами в указанных единицах. Единица по умолчанию — \"day\".\nПоддерживаемые единицы: \"millisecond\" (ms), \"second\" (s), \"minute\" (m), \"hour\" (h), \"day\" (d), \"week\" (w), \"month\" (M), \"year\" (y).\nРазница между датами определяется путём вычитания [date2] из [date1]. Это означает, что если [date2] позже [date1], результат будет отрицательным.",
+      "example": "DATETIME_DIFF(\"2023-09-08\", \"2022-08-01\", \"day\") => 403"
     },
     "WORKDAY": {
       "summary": "Возвращает рабочий день от указанной даты, исключая указанные праздники.",
@@ -566,7 +758,7 @@
     },
     "LAST_MODIFIED_TIME": {
       "summary": "Возвращает дату и время последнего изменения, сделанного пользователем в невычисляемом поле таблицы.",
-      "example": "LAST_MODIFIED_TIME() => \"2023-09-08 18:00:00\""
+      "example": "LAST_MODIFIED_TIME() => \"2023-09-08 18:00:00\"; LAST_MODIFIED_TIME({Due Date}) => \"2023-09-09 12:00:00\""
     },
     "COUNTALL": {
       "summary": "Возвращает количество всех элементов, включая текст и пустые значения.",
@@ -624,6 +816,7 @@
   },
   "statisticFunc": {
     "none": "Нет",
+    "count": "Count",
     "empty": "Пусто",
     "filled": "Заполнено",
     "unique": "Уникальные",
@@ -643,6 +836,11 @@
     "dateRangeOfDays": "Диапазон дат (дни)",
     "dateRangeOfMonths": "Диапазон дат (месяцы)",
     "totalAttachmentSize": "Общий размер вложений"
+  },
+  "selectionStatistic": {
+    "tip": "Агрегируются только поля типа Число.",
+    "copyTip": "Нажмите, чтобы скопировать",
+    "copied": "Скопировано"
   },
   "baseQuery": {
     "add": "Добавить",
@@ -695,26 +893,723 @@
     "placeholder": "Оставьте комментарий...",
     "emptyComment": "Начните разговор",
     "deletedComment": "Удаленный комментарий",
-    "imageSizeLimit": "Размер изображения не может превышать {{size}}",
     "tip": {
       "editing": "Редактирование...",
-      "edited": "(Отредактировано)",
-      "onNotify": "Вы будете уведомлены только о комментариях, связанных с вами, если отключите уведомления",
-      "offNotify": "Вы будете уведомлены обо всех активных комментариях, если включите уведомления",
-      "reactionUserSuffix": "отреагировал(а) эмодзи {{emoji}}",
-      "me": "Вы",
+      "edited": "(Редактировано)",
+      "notifyAll": "Уведомлять все комментарии",
+      "notifyRelatedToMe": "Уведомлять комментарии, связанные с мной",
+      "all": "Все",
+      "relatedToMe": "Связанные с мной",
+      "reactionUserSuffix": "отреагировал с эмодзи {{emoji}}",
+      "me": "Ты",
       "connection": "и"
     },
     "toolbar": {
       "link": "Ссылка",
-      "image": "Изображение"
+      "image": "Изображение",
+      "mention": "Упоминание"
     },
     "floatToolbar": {
       "editLink": "Редактировать ссылку",
-      "caption": "Подпись",
-      "delete": "Удалить",
       "linkText": "Текст ссылки",
       "enterUrl": "Введите URL"
+    }
+  },
+  "memberSelector": {
+    "title": "Select Members",
+    "memberSelectorSearchPlaceholder": "Search members...",
+    "departmentSelectorSearchPlaceholder": "Search departments...",
+    "selected": "Selected",
+    "empty": "No members",
+    "emptyDepartment": "No departments"
+  },
+  "httpErrors": {
+    "validationError": "Ошибка валидации",
+    "invalidCaptcha": "Неверный Captcha",
+    "invalidCredentials": "Неверные учетные данные",
+    "unauthorized": "Неавторизован",
+    "unauthorizedShare": "Неавторизованная доступ",
+    "paymentRequired": "Требуется оплата",
+    "creditLimitExceeded": "Превышен лимит кредитов",
+    "restrictedResource": "Ограниченный ресурс",
+    "notFound": "Не найдено",
+    "viewNotFound": "Представление не найдено",
+    "conflict": "Конфликт",
+    "unprocessableEntity": "Необрабатываемый ресурс",
+    "userLimitExceeded": "Превышен лимит пользователя",
+    "tooManyRequests": "Слишком много запросов",
+    "payloadTooLarge": "Слишком большой объём данных",
+    "internalServerError": "Внутренняя ошибка сервера",
+    "databaseConnectionUnavailable": "Недоступная база данных",
+    "gatewayTimeout": "Таймаут шлюза",
+    "unknownErrorCode": "Неизвестный код ошибки",
+    "networkError": "Проблема сетевого подключения",
+    "requestTimeout": "Таймаут запроса",
+    "failedDependency": "Ошибка зависимости",
+    "automationNodeParseError": "Ошибка разбора узла автоматизации",
+    "automationNodeNeedTest": "Узел автоматизации требует тестирования",
+    "automationNodeTestOutdated": "Тест узла автоматизации устарел",
+    "invalidToken": "Недействительный токен",
+    "limit": {
+      "fieldOptionsMaxBytes": "Параметры поля слишком большие. Максимум — {{max}} байт.",
+      "selectChoicesMax": "В этом поле выбора слишком много вариантов. Максимум — {{max}} вариантов.",
+      "selectChoiceNameMaxLength": "Названия вариантов выбора слишком длинные. Максимум — {{max}} символов.",
+      "selectDefaultValuesMax": "В этом поле выбора слишком много значений по умолчанию. Максимум — {{max}} значений.",
+      "cellValueMaxBytes": "Значение ячейки слишком большое. Максимум — {{max}} байт.",
+      "recordFieldsMaxBytes": "Содержимое записи слишком большое. Максимум — {{max}} байт.",
+      "recordsPerMutationMax": "Эта операция изменяет слишком много записей. Максимум — {{max}} записей за раз.",
+      "computedCellValueMaxBytes": "Вычисленное значение ячейки слишком большое. Максимум — {{max}} байт.",
+      "formulaMaxLength": "Формула слишком длинная. Максимум — {{max}} символов.",
+      "tablesPerBaseMax": "Эта база достигла лимита таблиц. Максимум — {{max}} таблиц.",
+      "fieldsPerTableMax": "В этой таблице слишком много полей. Максимум — {{max}} полей.",
+      "rowsPerTableMax": "В этой таблице слишком много записей. Максимум — {{max}} записей.",
+      "viewsPerTableMax": "Эта таблица достигла лимита представлений. Максимум — {{max}} представлений.",
+      "createTableFieldsMax": "В новой таблице слишком много полей. Максимум — {{max}} полей.",
+      "createTableViewsMax": "В новой таблице слишком много представлений. Максимум — {{max}} представлений.",
+      "createTableRecordsMax": "В новой таблице слишком много записей. Максимум — {{max}} записей.",
+      "viewFilterItemsMax": "В этом представлении слишком много условий фильтра. Максимум — {{max}} условий.",
+      "viewFilterDepthMax": "Фильтр этого представления слишком глубоко вложен. Максимальная глубина — {{max}}.",
+      "viewSortItemsMax": "В этом представлении слишком много правил сортировки. Максимум — {{max}} правил.",
+      "viewGroupItemsMax": "В этом представлении слишком много правил группировки. Максимум — {{max}} правил.",
+      "viewOptionsMaxBytes": "Параметры представления слишком большие. Максимум — {{max}} байт.",
+      "nameMaxLength": "Название слишком длинное. Максимум — {{max}} символов.",
+      "descriptionMaxLength": "Описание слишком длинное. Максимум — {{max}} символов."
+    },
+    "custom": {
+      "fieldValueNotNull": "\"{{tableName}}\" поле \"{{fieldName}}\" не допускает пустые значения, пожалуйста, заполните его полностью перед отправкой.",
+      "fieldValueDuplicate": "\"{{tableName}}\" поле \"{{fieldName}}\" не допускает дубликаты значений, пожалуйста, заполните уникальное значение перед отправкой.",
+      "recordFieldValueNotNull": "Поле \"{{fieldName}}\" не допускает пустые значения, пожалуйста, заполните его полностью перед отправкой.",
+      "recordFieldValueDuplicate": "Поле \"{{fieldName}}\" не допускает дубликаты значений, пожалуйста, заполните уникальное значение перед отправкой.",
+      "recordDeleteBlockedByRequiredLink": "Невозможно удалить: обязательное поле связи \"{{fieldName}}\" в таблице \"{{tableName}}\" станет пустым.",
+      "recordDeleteBlockedByRequiredLinkGeneric": "Невозможно удалить: эта запись всё ещё используется полем связи в другой таблице.",
+      "recordDeleteBlockedByLink": "Невозможно удалить: поле связи \"{{fieldName}}\" в таблице \"{{tableName}}\" всё ещё ссылается на эту запись.",
+      "linkFieldValueDuplicate": "\"{{fieldName}}\" поле не допускает дубликаты связей с одним и тем же записью",
+      "linkBatchDuplicate": "Невозможно связать запись: в этом же пакете она уже связана другой записью. В отношениях один-ко-многим каждая дочерняя запись может принадлежать только одной родительской записи.",
+      "linkOneManyDuplicate": "Невозможно связать запись: она уже связана с другой записью. В отношениях один-ко-многим каждая дочерняя запись может принадлежать только одной родительской записи.",
+      "linkOneOneDuplicate": "Невозможно связать запись: целевая запись уже связана другой записью в отношении один-к-одному.",
+      "fieldMaxColumnLimit": "Таблица \"{{tableName}}\" может содержать не более {{maxFieldCount}} полей.",
+      "fieldRequiredExistingValues": "Нельзя сделать поле \"{{fieldName}}\" обязательным, поскольку существующие записи содержат пустые значения.",
+      "fieldUniqueExistingValues": "Нельзя сделать поле \"{{fieldName}}\" уникальным, поскольку существующие записи содержат повторяющиеся значения.",
+      "requestTimeout": "Текущая операция слишком велика, пожалуйста, попробуйте снова с меньшим диапазоном.",
+      "searchTimeOut": "Поиск завершился, уменьшите область поиска и повторите.",
+      "dependencyNodeRequire": "Зависимый узел не протестирован, пожалуйста, проверьте, протестированы ли все предыдущие узлы",
+      "invalidOperation": "Обнаружена недопустимая операция, пожалуйста, проверьте параметры операции"
+    },
+    "comment": {
+      "listCountExceeded": "Количество запрошенных комментариев превышает максимальный лимит 1000",
+      "invalidContentType": "Неверный тип содержимого комментария"
+    },
+    "attachment": {
+      "tokenExpireInTooLong": "Срок действия токена должен быть менее 7 дней",
+      "s3RegionRequired": "Регион S3 обязателен",
+      "s3EndpointRequired": "Конечная точка S3 обязательна",
+      "s3AccessKeyRequired": "Ключ доступа S3 обязателен",
+      "s3SecretKeyRequired": "Секретный ключ S3 обязателен",
+      "s3UploadMethodMustBePut": "Метод загрузки S3 должен быть PUT",
+      "presignedError": "Не удалось сгенерировать предварительно подписанный URL",
+      "invalidObjectMeta": "Недопустимые метаданные объекта",
+      "invalidImageStream": "Недопустимый поток изображения",
+      "calculateImageSizeFailed": "Не удалось рассчитать размер изображения",
+      "uploadFailed": "Загрузка не удалась",
+      "invalidImage": "Недопустимое изображение",
+      "cantGetImageStream": "Невозможно получить поток изображения",
+      "invalidProvider": "Недопустимый поставщик хранилища",
+      "failedToDeleteDirectory": "Не удалось удалить каталог",
+      "invalidToken": "Недействительный токен",
+      "tokenExpired": "Срок действия токена истек",
+      "sizeMismatch": "Размер файла не совпадает",
+      "notAllowUploadFileType": "Тип файла {{mimetype}} не разрешен для загрузки",
+      "notFound": "Вложение не найдено",
+      "invalidPath": "Недопустимый путь к вложению",
+      "fileSizeExceedsMaximumLimit": "Размер файла превышает максимальный лимит {{maxSize}}",
+      "invalidUploadType": "Недопустимый тип загрузки",
+      "urlReject": "URL отклонен или недоступен"
+    },
+    "email": {
+      "testEmailError": "Ошибка конфигурации почты {{message}}"
+    },
+    "auth": {
+      "invalidConfirm": "Invalid confirmation input",
+      "emailNotRegistered": "This email is not registered",
+      "passwordNotSet": "Password has not been set for this account",
+      "systemUser": "This is a system user account",
+      "alreadyRegistered": "This email is already registered",
+      "passwordIncorrect": "The password is incorrect",
+      "tokenInvalid": "The token is invalid or has expired",
+      "passwordAlreadyExists": "Password has already been set for this account",
+      "verificationCodeInvalid": "The verification code is invalid or has expired",
+      "newEmailSameAsCurrentEmail": "The new email address is the same as the current one",
+      "emailAlreadyRegistered": "This email address is already registered",
+      "waitlistNotEnabled": "The waitlist feature is not enabled",
+      "emailOrPasswordIncorrect": "Email or password is incorrect",
+      "accountDeactivated": "This account has been deactivated by the administrator",
+      "accountLockedOut": "Your account has been locked due to too many failed login attempts. Please try again later.",
+      "passwordLoginDisabled": "Вход по паролю отключён"
+    },
+    "automation": {
+      "buttonClickTriggerDuplicated": "Это поле кнопки уже связано с {{name}}[{{id}}] этот процесс автоматизации, пожалуйста, выберите другое поле кнопки",
+      "triggerNotFound": "Автоматизация должна иметь узел триггера",
+      "nodeNotFound": "{{nodeId}} узел не найден",
+      "triggerTestFailed": "Тест триггера провалился, пожалуйста, проверьте конфигурацию триггера",
+      "testFailed": "Тест автоматизации не прошел, проверьте конфигурацию автоматизации",
+      "runFailed": "Сбой выполнения автоматизации",
+      "nodeParseError": "{{name}} конфигурация узла неполная или содержит ошибки, пожалуйста, проверьте конфигурацию узла",
+      "nodeNeedTest": "{{name}} узел требует тестирования",
+      "nodeTestOutdated": "{{name}} тест узла устарел",
+      "notFound": "Автоматизация не найдена",
+      "currentSnapshotEmpty": "Текущий снимок автоматизации пуст",
+      "runNotFound": "Выполнение автоматизации не найдено",
+      "anchorNotFound": "Якорная автоматизация не найдена",
+      "validationError": "Ошибка валидации конфигурации автоматизации",
+      "tableNotInBase": "Вы можете подписаться только на таблицу в пределах вашей базы данных",
+      "alreadyActiveAndNotDraft": "Автоматизация уже активна и не является черновиком",
+      "noActiveSnapshot": "У автоматизации нет активного снимка",
+      "onlyFailedRunsCanRerun": "Повторно запустить можно только неудачные выполнения",
+      "workflowMustBeActiveToRerun": "Для повторного запуска рабочий процесс должен быть активен",
+      "snapshotChangedOnlyFullRerun": "Рабочий процесс был изменён после этого выполнения. Допускается только полный повторный запуск.",
+      "runPayloadColdTruncated": "Часть данных этого запуска была усечена при холодном архивировании; повторный запуск недоступен",
+      "runListOffsetTooDeep": "Эта страница слишком далеко в истории запусков для постраничной навигации по смещению; продолжите с курсором, возвращённым предыдущей страницей.",
+      "controlStepsMissingOnlyFullRerun": "Данные узла управления отсутствуют для этого выполнения. Поддерживается только полный повторный запуск.",
+      "triggerNodeAlreadyExists": "У этой автоматизации уже есть узел триггера",
+      "scheduledIntervalTooShort": "Интервал запуска запланированных автоматизаций должен быть не менее {{min}} минут",
+      "emailPollIntervalTooShort": "Интервал проверки новой почты для почтовых триггеров должен быть не менее {{min}} минут",
+      "unSupportLogicType": "Неподдерживаемый тип логики",
+      "generateLogicError": "Ошибка генерации узла логики",
+      "logicNotFound": "Узел логики автоматизации не найден",
+      "groupEndNotFound": "GroupEnd не найден для логики",
+      "insertNodeError": "Ошибка вставки узла",
+      "actionNotFound": "Узел действия автоматизации не найден",
+      "unSupportDuplicateWorkflowNodeType": "Дублирование этого типа узла автоматизации не поддерживается",
+      "controlNodeNotBeTested": "Узел управления не должен тестироваться",
+      "invalidNodeType": "Недопустимый тип узла",
+      "unsupportedCategory": "Неподдерживаемая категория",
+      "unknownConnectionType": "Неизвестный тип подключения электронной почты",
+      "imapPasswordNotConfigured": "Пароль IMAP не настроен",
+      "integrationNotFound": "Интеграция не найдена или не имеет учётных данных",
+      "webhookTriggerNotFound": "Триггер вебхука не найден",
+      "emailReceivedTriggerNotFound": "Триггер получения электронной почты не найден",
+      "emailConnectorNotAvailable": "Служба коннектора электронной почты недоступна",
+      "listMailboxesFailed": "Не удалось получить список почтовых ящиков: {{detail}}"
+    },
+    "scrape": {
+      "unknownDataset": "Неизвестный набор данных: {{datasetId}}",
+      "apiKeyNotConfigured": "Сервис скрейпинга не настроен",
+      "triggerFailed": "Ошибка запуска скрейпинга: {{detail}}",
+      "snapshotError": "Ошибка снимка скрейпинга: {{detail}}",
+      "timeout": "Таймаут скрейпинга после {{seconds}}с"
+    },
+    "integration": {
+      "oauthCodeExchangeFailed": "Failed to exchange OAuth code: {{detail}}",
+      "oauthTokenRefreshFailed": "Failed to refresh OAuth token: {{detail}}",
+      "userInfoFetchFailed": "Failed to get user info: {{detail}}"
+    },
+    "space": {
+      "notFound": "Пространство не найдено",
+      "noPermission": "У вас нет разрешения на доступ к этому пространству",
+      "disallowSpaceCreation": "Создание пространств отключено администратором",
+      "cannotChangeOnlyOwnerRole": "Невозможно изменить роль единственного владельца пространства",
+      "cannotDeleteOnlyOwner": "Невозможно удалить единственного владельца пространства",
+      "deleted": "Space has been deleted",
+      "cannotOperate": "Невозможно работать с пространством, убедитесь, что в пространстве есть члены организации и они являются владельцами",
+      "notBelongToOrg": "Это пространство не принадлежит организации",
+      "invalidSpaceIds": "Недопустимые идентификаторы пространства: {{spaceIds}}",
+      "freeOwnedSpaceLimitExceeded": "You have reached the maximum number of free spaces you can own ({{max}}). Please upgrade an existing space or delete one to create a new free space.",
+      "freeOwnedSpaceLimitExceededOther": "{{name}} has reached the maximum number of free spaces they can own ({{max}})."
+    },
+    "base": {
+      "notFound": "База не найдена",
+      "cannotAccess": "У вас нет разрешения на доступ к базе {{baseId}}",
+      "anchorNotFound": "Якорная база {{anchorId}} не найдена",
+      "baseAndSpaceMismatch": "База {{baseId}} и пространство {{spaceId}} не совпадают",
+      "templateNotFound": "Шаблон {{templateId}} не найден"
+    },
+    "baseNode": {
+      "baseIdIsRequired": "Базовая ID требуется",
+      "nodeIdIsRequired": "Узел ID требуется",
+      "invalidResourceType": "Недопустимый тип ресурса",
+      "notFound": "Базовый узел не найден",
+      "parentMustBeFolder": "Родитель должен быть папкой",
+      "cannotDuplicateFolder": "Невозможно дублировать папку",
+      "cannotDeleteEmptyFolder": "Невозможно удалить папку, так как она не пуста",
+      "onlyOneOfParentIdOrAnchorIdRequired": "Необходимо указать только parentId или anchorId",
+      "cannotMoveToItself": "Невозможно переместить узел на себя",
+      "cannotMoveToCircularReference": "Невозможно переместить узел в свой собственный дочерний узел (циклическая ссылка)",
+      "anchorIdOrParentIdRequired": "Необходимо указать хотя бы parentId или anchorId",
+      "parentNotFound": "Родительский узел не найден",
+      "parentIsNotFolder": "Родитель не является папкой",
+      "circularReference": "Обнаружена циклическая ссылка",
+      "folderDepthLimitExceeded": "Превышен лимит глубины папки",
+      "folderNotFound": "Папка не найдена",
+      "anchorNotFound": "Якорный узел не найден",
+      "nameAlreadyExists": "Имя уже существует"
+    },
+    "dashboard": {
+      "notFound": "Панель управления не найдена"
+    },
+    "plugin": {
+      "notFound": "Плагин не найден",
+      "notSupportInstallInView": "Плагин не поддерживает установку в представление",
+      "userNotFound": "Пользователь плагина не найден",
+      "invalidSecret": "Недействительный секрет",
+      "invalidRefreshToken": "Недействительный токен обновления",
+      "anomalousToken": "Аномальный токен"
+    },
+    "pluginPanel": {
+      "notFound": "Панель плагинов не найдена"
+    },
+    "pluginInstall": {
+      "notFound": "Плагин не установлен"
+    },
+    "share": {
+      "incorrectPassword": "Неверный пароль",
+      "notAllowedToSubmit": "Отправка формы не разрешена",
+      "notAllowedToEdit": "Редактирование этого общего ресурса не разрешено",
+      "viewRequired": "Для этой операции требуется представление",
+      "hiddenFieldsSubmissionNotAllowed": "Отправка формы не разрешена при наличии скрытых полей",
+      "submitRecordsError": "Ошибка отправки записи",
+      "notAllowedToCopy": "Операция копирования не разрешена",
+      "fieldHiddenNotAllowed": "Поле скрыто и недоступно",
+      "fieldTypeNotLinkField": "Поле не является полем связи",
+      "fieldIdRequired": "Требуется ID поля",
+      "fieldNotUserRelatedField": "Поле не связано с пользователем",
+      "viewTypeNotAllowed": "Этот тип представления не разрешен для данной операции"
+    },
+    "shareAuth": {
+      "passwordRestrictionNotEnabled": "Ограничение паролем не включено для этого общего представления",
+      "shareViewNotFound": "Общее представление не найдено или общий доступ отключен",
+      "linkFieldNotFound": "Поле связи не найдено",
+      "loginRequired": "Войдите, чтобы редактировать это общее представление"
+    },
+    "baseShare": {
+      "notFound": "Общий доступ к базе не найден или отключен",
+      "alreadyExists": "Общий доступ для этого узла уже существует",
+      "copyNotAllowed": "Этот общий доступ не разрешает копирование"
+    },
+    "shareSocket": {
+      "viewPermissionNotAllowed": "У вас нет разрешения на доступ к этому представлению",
+      "fieldPermissionNotAllowed": "У вас нет разрешения на доступ к этим полям",
+      "recordPermissionNotAllowed": "У вас нет разрешения на доступ к этим записям"
+    },
+    "pluginContextMenu": {
+      "notFound": "Контекстное меню плагина не найдено",
+      "anchorNotFound": "Якорь контекстного меню плагина не найден"
+    },
+    "pluginChart": {
+      "queryNotFound": "Запрос диаграммы плагина не найден"
+    },
+    "dbConnection": {
+      "unsupportedDriver": "Неподдерживаемый драйвер базы данных: {{driver}}",
+      "onlyOwnerCanRemove": "Только владелец базы может удалить подключение к базе данных для базы {{baseId}}",
+      "onlyOwnerCanCreate": "Только владелец базы может создать подключение к базе данных для базы {{baseId}}",
+      "roleNotExist": "Роль базы данных {{role}} не существует"
+    },
+    "baseQuery": {
+      "queryFailed": "Запрос не выполнен: {{message}}",
+      "invalidJoinType": "Недопустимый тип соединения: {{joinType}}",
+      "tableNotFound": "Таблица {{tableId}} не найдена в базе {{baseId}}"
+    },
+    "baseSqlExecutor": {
+      "notAllowedToExecuteSqlWithKeyword": "Не разрешено выполнять SQL с ключевым словом {{keyword}}",
+      "whiteListCheckError": "Произошла ошибка при проверке доступа к таблице: {{message}}",
+      "databaseConnectionFailed": "Не удалось подключиться к базе данных: {{message}}",
+      "executeQuerySqlFailed": "Не удалось выполнить запрос SQL: {{message}}",
+      "readOnlyCheckFailed": "Проверка режима «только чтение» не пройдена: {{message}}",
+      "sqlSyntaxError": "Ошибка синтаксиса SQL, проверьте ваш запрос"
+    },
+    "permission": {
+      "createRecordWithDeniedFields": "У вас нет разрешения на создание записей с полями({{fields}})",
+      "deleteRecords": "У вас нет разрешения на удаление записей({{recordIds}})",
+      "readRecordWithDeniedFields": "У вас нет разрешения на чтение полей({{fields}}) в записи({{recordId}})",
+      "updateRecordWithDeniedFields": "У вас нет разрешения на обновление полей({{fields}}) в записи({{recordId}})",
+      "checkIdNotExist": "ID проверки разрешений не существует",
+      "userNotAdmin": "Пользователь не является администратором",
+      "accessTokenNoPermission": "Токен доступа не имеет необходимого разрешения",
+      "invalidResource": "Ресурс недействителен",
+      "notAllowedSpace": "У вас нет разрешения на доступ к этому пространству",
+      "notAllowedBase": "У вас нет разрешения на доступ к этой базе",
+      "notAllowedTables": "У вас нет разрешения на доступ к таблицам({{tableIds}})",
+      "notAllowedOperationTable": "У вас нет разрешения на операции с этой таблицей",
+      "notAllowedOperationRecord": "У вас нет разрешения на операции с этой записью",
+      "notAllowedRecordUpdate": "У вас нет разрешения на обновление этой записи",
+      "notAllowedOperationView": "У вас нет разрешения на операции с этим представлением",
+      "deniedByEnabledAuthorityMatrix": "Разрешение отклонено активированной матрицей полномочий",
+      "invalidRequestPath": "Путь запроса недействителен",
+      "notAllowedOperation": "У вас нет разрешения на выполнение этой операции",
+      "notAllowedDepartment": "Вам не разрешен доступ к этому отделу",
+      "templateHeaderInvalid": "Недопустимый заголовок шаблона"
+    },
+    "authorityMatrix": {
+      "defaultRoleNotFound": "Роль по умолчанию не найдена",
+      "alreadyDisabled": "Матрица полномочий уже отключена",
+      "alreadyEnabled": "Матрица полномочий уже включена",
+      "notFound": "Матрица полномочий не найдена",
+      "primaryFieldCannotBeDisabledForRead": "Основное поле не может быть отключено для чтения",
+      "fieldDuplicated": "Поле дублируется в конфигурации разрешений",
+      "cannotSetRecordPermissionGroup": "Невозможно установить эту комбинацию разрешений записи({{actions}})",
+      "notFoundBaseAndTable": "ID базы и ID таблицы не найдены",
+      "roleTablesShouldNotBeEmpty": "Таблицы ролей матрицы полномочий не должны быть пустыми"
+    },
+    "selection": {
+      "invalidReturnType": "Неверный тип возврата",
+      "exceedMaxReadRows": "Превышен максимальный лимит чтения строк",
+      "invalidCellValueType": "Неверный тип значения ячейки",
+      "exceedMaxCopyCells": "Превышен максимальный лимит копируемых ячеек",
+      "exceedMaxPasteCells": "Превышен максимальный лимит вставляемых ячеек"
+    },
+    "field": {
+      "unsupportedFieldType": "Неподдерживаемый тип поля {{type}}",
+      "unsupportedPrimaryFieldType": "Неподдерживаемый тип поля {{type}} в качестве первичного поля",
+      "primaryFieldNotSupported": "Тип поля не поддерживается в качестве первичного поля",
+      "calculateRecordNotFound": "Запись не найдена для: {{value}}, fieldId: {{fieldId}}, при вычислении {{recordId}}",
+      "toRecordIdsOrFromRecordIdsRequired": "toRecordIds или fromRecordIds требуется для обычного вычисляемого поля",
+      "recordFieldsRequired": "Поля записи не определены",
+      "uniqueUnsupportedType": "Поле {{name}}[{{fieldId}}] не поддерживает проверку уникальности значения поля",
+      "notNullValidationWhenCreateField": "Поле {{name}}[{{fieldId}}] не поддерживает проверку не null при создании нового поля",
+      "dbFieldNameAlreadyExists": "Имя поля базы данных {{dbFieldName}} уже существует",
+      "fieldValidationError": "Поле {{name}}[{{fieldId}}] ошибка проверки поля",
+      "fieldNameAlreadyExists": "Имя поля {{name}} уже существует",
+      "notFound": "Поле не найдено",
+      "fieldKeyTypeNotFound": "Поле \"{{fieldKeyType}}: {{missedFields}}\" не найдено",
+      "notFoundInTable": "Поле {{fieldId}} не найдено в таблице {{tableId}}",
+      "deleteFieldsNotFound": "Поля для удаления {{fieldIds}} не найдены в таблице {{tableId}}",
+      "lookupValuesShouldBeArray": "lookupValues должен быть массивом, когда поле связи имеет несколько значений ячейки",
+      "linkCellValuesShouldBeArray": "linkCellValues должен быть массивом, когда поле связи имеет несколько значений ячейки",
+      "lookupAndLinkLengthMatch": "Длина lookupValues должна быть такой же, как длина linkCellValues",
+      "cycleDetected": "Обнаружен цикл",
+      "cycleDetectedCreateField": "Обнаружен цикл, невозможно создать поле {{name}}[{{id}}]",
+      "recordMapNotFound": "Запись не найдена в таблице {{tableName}} для поля {{fieldName}}",
+      "forbidDeletePrimaryField": "Запрещено удалять первичное поле",
+      "foreignTableIdInvalid": "Внешняя таблица {{foreignTableId}} недействительна",
+      "crossSpaceLinkForbidden": "Перекрёстные ссылки между пространствами не поддерживаются. Пожалуйста, выберите таблицу в том же пространстве (целевая таблица {{foreignTableId}} находится в другом пространстве).",
+      "relationshipInvalid": "Отношение {{relationship}} недействительно",
+      "linkFieldIdInvalid": "Поле связи {{linkFieldId}} недействительно",
+      "lookupFieldIdInvalid": "Поле поиска {{lookupFieldId}} недействительно",
+      "formulaExpressionParseError": "Ошибка разбора выражения формулы",
+      "formulaReferenceNotFound": "Поле ссылки формулы {{fieldIds}} не найдено",
+      "formulaReferenceNotFieldId": "Ссылки формулы {{fieldIds}} не найдены. В формулах нужно использовать ID полей (формат fldXXXXXXXXXXXXXXXX), а не их названия.",
+      "rollupExpressionParseError": "Ошибка разбора выражения сводки",
+      "choiceNameAlreadyExists": "Имя выбора {{name}} уже существует",
+      "symmetricFieldIdRequired": "Требуется идентификатор симметричного поля",
+      "foreignKeyNameCannotUseId": "Имя внешнего ключа не может использовать __id",
+      "createForeignKeyError": "Ошибка создания внешнего ключа",
+      "lookupFieldTypeNotEqual": "Текущий тип поля {{fieldType}} не равен типу поля поиска {{lookupFieldType}}",
+      "recordNotFound": "Запись {{recordId}} не найдена в {{tableId}}",
+      "linkCellRecordIdAlreadyExists": "Невозможно установить дублирующий recordId: {{recordId}} в той же ячейке",
+      "linkConsistencyError": "Ошибка согласованности, recordId {{recordId}} не существует",
+      "oneOneLinkCellValueCannotBeArray": "Значения поля связи один-к-одному не могут быть массивом",
+      "manyOneLinkCellValueCannotBeArray": "Значения поля связи многие-к-одному не могут быть массивом",
+      "oneManyLinkCellValueShouldBeArray": "Значения поля связи один-ко-многим должны быть массивом",
+      "manyManyLinkCellValueShouldBeArray": "Значения поля связи многие-ко-многим должны быть массивом",
+      "foreignKeyDuplicate": "Дубликат внешнего ключа",
+      "onlyLinkFieldCanBeFiltered": "Только поля связи могут использоваться для фильтрации",
+      "notLinkedToCurrentTable": "Поле не связано с текущей таблицей",
+      "notAttachment": "Поле не является полем вложения",
+      "isComputed": "Поле вычисляется и не может быть изменено",
+      "notFoundAICofig": "Поле не имеет конфигурации AI",
+      "foreignTableIdRequired": "Внешняя таблица обязательна",
+      "lookupFieldIdRequired": "Поле поиска обязательно",
+      "lookupFieldNotExist": "Поле поиска {{lookupFieldId}} не существует",
+      "lookupFieldNotBelongToTable": "Поле поиска {{lookupFieldId}} не принадлежит таблице {{foreignTableId}}",
+      "lookupFieldTypeNotMatch": "Текущий тип поля {{fieldType}} не соответствует типу поля поиска {{lookupFieldType}}",
+      "conditionalRollupOptionsRequired": "Параметры поля условного свертывания обязательны",
+      "conditionalRollupParseError": "Ошибка парсинга условного свертывания: {{message}}",
+      "conditionalLookupOptionsRequired": "Параметры поля условного поиска обязательны",
+      "button": {
+        "clickCountReachedMaxCount": "Количество нажатий кнопки достигло максимального предела",
+        "notSupportReset": "Кнопка не поддерживает сброс"
+      },
+      "primaryCannotBeLookup": "Основное поле не может быть настроено как поле Lookup",
+      "primaryFieldAlreadyExists": "В таблице уже есть основное поле"
+    },
+    "view": {
+      "notFound": "Представление не найдено",
+      "cannotDeleteLastView": "Нельзя удалить последнее представление таблицы. В таблице должно быть хотя бы одно представление.",
+      "defaultViewNotFound": "Представление по умолчанию не найдено",
+      "propertyParseError": "Не удалось разобрать свойство представления",
+      "primaryFieldCannotBeHidden": "Первичное поле не может быть скрыто",
+      "filterUnsupportedFieldType": "Фильтр не поддерживает тип поля",
+      "filterInvalidOperator": "В фильтре указан недопустимый оператор для этого типа поля",
+      "filterInvalidOperatorMode": "В фильтре недопустимое сочетание оператора и режима",
+      "sortUnsupportedFieldType": "Сортировка не поддерживает тип поля",
+      "groupUnsupportedFieldType": "Группировка не поддерживает тип поля",
+      "anchorNotFound": "Якорное представление не найдено",
+      "notEnoughGapToShuffleRow": "Недостаточно места для перемешивания строки",
+      "shareNotEnabled": "Общий доступ к представлению не включен",
+      "shareAlreadyEnabled": "Общий доступ к представлению уже включен",
+      "shareAlreadyDisabled": "Общий доступ к представлению уже отключен"
+    },
+    "billing": {
+      "insufficientCredit": "Недостаточно средств",
+      "upgradeRequired": "Эта функция недоступна на вашем текущем тарифе. Перейдите на более высокий тариф, чтобы её использовать.",
+      "exceedMaxRowLimit": "Превышен максимальный лимит строк {{maxRowCount}}",
+      "exceedMaxAttachmentSizeLimit": "Хранилище вложений достигло лимита вашего тарифа. Повысьте тариф или удалите часть вложений.",
+      "exceedMaxSystemEmailLimit": "Ежемесячные отправки писем достигли лимита вашего тарифа. Повысьте тариф.",
+      "exceedMaxAutomationRunLimit": "Достигнут максимальный месячный лимит запусков автоматизации",
+      "manualSubscriptionNotSupported": "Самостоятельное управление подпиской недоступно для этого пространства. Для повышения, понижения или других изменений подписки обратитесь в службу поддержки Teable.",
+      "appSumoSubscriptionNotSupported": "Подписки AppSumo не могут быть изменены через этот интерфейс. Пожалуйста, управляйте подпиской на AppSumo.",
+      "customerNotFound": "Запись клиента для выставления счетов для этого пространства не найдена."
+    },
+    "aggregation": {
+      "searchQueryRequired": "Требуется поисковой запрос",
+      "maxSearchIndexResult": "Максимальный результат поискового индекса составляет 1000",
+      "queryCollectionMustBeTableId": "Коллекция запросов должна быть идентификатором таблицы",
+      "searchTimeOut": "Поиск завершился, уменьшите область поиска и повторите.",
+      "indexNotFound": "Индекс не найден",
+      "invalidStartDateFieldId": "Недействительный идентификатор поля даты начала",
+      "invalidEndDateFieldId": "Недействительный идентификатор поля даты окончания",
+      "fieldMapRequired": "Карта полей требуется при установке поиска",
+      "filterLinkCellQueryConflict": "filterLinkCellSelected и filterLinkCellCandidate нельзя установить одновременно"
+    },
+    "ai": {
+      "chatModelLgNotSet": "Модель чата ИИ lg не установлена",
+      "chatModelLgProviderNotSet": "Провайдер модели чата ИИ lg не установлен",
+      "chatModelSmNotSet": "Модель чата ИИ sm не установлена",
+      "chatModelMdNotSet": "Модель чата ИИ md не установлена",
+      "configurationNotSet": "Конфигурация ИИ не установлена",
+      "unsupportedProvider": "Неподдерживаемый провайдер ИИ {{type}}",
+      "providerConfigurationNotSet": "Конфигурация провайдера ИИ не установлена",
+      "gatewayApiKeyNotSet": "Ключ API AI Gateway не настроен",
+      "testLLMFailed": "Тест подключения LLM не прошел",
+      "audioNotSupported": "Аудио ввод не поддерживается этой моделью {{model}}",
+      "imageNotSupported": "Ввод изображения не поддерживается этой моделью {{model}}",
+      "modelNotSet": "Модель ИИ не установлена",
+      "unsupportedFileType": "Неподдерживаемый тип файла {{mimetype}}",
+      "attachmentDownloadFailed": "Не удалось загрузить вложение: {{reason}}",
+      "unsupportedModelType": "Неподдерживаемый тип модели",
+      "embeddingModelNotSet": "Модель встраивания не установлена",
+      "validateActionFailed": "Не удалось проверить действие AI поля",
+      "generateFailed": "Не удалось сгенерировать AI",
+      "unsupportedActionType": "Неподдерживаемый тип действия AI",
+      "geminiImageNotSupportedViaGateway": "Генерация изображений Gemini не поддерживается через AI Gateway. Настройте прямого провайдера Google."
+    },
+    "skill": {
+      "notFound": "Навык не найден",
+      "onlyGithubCanSync": "Синхронизировать можно только навыки из GitHub",
+      "syncFailed": "Ошибка синхронизации: {{errorCode}}",
+      "skillMdNotFoundAtSource": "SKILL.md не найден в исходном расположении",
+      "slugChangedUpstream": "Идентификатор навыка изменился в источнике с \"{{oldSlug}}\" на \"{{newSlug}}\". Удалите и повторно импортируйте, чтобы принять новый идентификатор.",
+      "skillMdNotFoundAtPath": "SKILL.md не найден по пути {{path}}/SKILL.md",
+      "invalidSkillFile": "Недопустимый файл навыка. Ожидается архив .skill или .zip",
+      "tooManyResourceFiles": "Навык содержит слишком много файлов (макс. {{max}})",
+      "noSkillMdInPackage": "SKILL.md не найден в пакете навыка",
+      "multipleSkillMdInPackage": "Найдено {{count}} файлов SKILL.md на одном уровне. Пакет должен содержать ровно один навык.",
+      "invalidResourcePaths": "Недопустимые пути ресурсов: {{paths}}",
+      "nameFieldRequired": "SKILL.md должен содержать поле \"name\" во frontmatter",
+      "invalidSlugFormat": "Идентификатор навыка должен состоять из строчных букв, цифр и дефисов",
+      "filesExceedSizeLimit": "Файлы превышают ограничение в {{maxSizeKB}} КБ: {{files}}",
+      "binaryFilesNotAllowed": "Бинарные файлы не допускаются: {{files}}",
+      "totalSizeExceedsLimit": "Общий размер ресурсов превышает ограничение в {{maxSizeMB}} МБ",
+      "invalidGithubUrl": "Недопустимый URL GitHub. Ожидается: https://github.com/owner/repo/tree/<branch>/path/to/skill",
+      "directoryTooDeep": "Каталог навыка превышает максимальную глубину в {{maxDepth}} уровней. Вложенные каталоги: {{dirs}}",
+      "importFailed": "Ошибка импорта: {{errorCode}}",
+      "alreadyInScope": "Навык уже находится в целевой области"
+    },
+    "sandbox": {
+      "fileNotFound": "Файл не найден в песочнице",
+      "onlyRegularFiles": "Скачивать можно только обычные файлы",
+      "fileTooLarge": "Файл слишком большой для скачивания (максимум {{max}} байт)",
+      "cannotDeleteRoot": "Невозможно удалить корневую папку uploads/outputs",
+      "deleteFailed": "Не удалось удалить файлы",
+      "uploadFailed": "Не удалось загрузить файл в песочницу",
+      "fileEndpointUnavailable": "Песочница не предоставляет доступную конечную точку для файлов",
+      "invalidPath": "Недопустимый путь к файлу: он должен находиться в каталоге uploads или outputs песочницы",
+      "tooManyDownloads": "Слишком много запросов на скачивание",
+      "dailyLimitExceeded": "Превышен дневной лимит размера скачивания",
+      "storageFull": "Хранилище песочницы заполнено",
+      "tooManyFiles": "В одном сообщении допускается не более {{max}} файлов",
+      "noActiveSandbox": "Активная песочница не найдена"
+    },
+    "role": {
+      "notFound": "Роль не найдена"
+    },
+    "collaborator": {
+      "alreadyExisted": "Соавтор уже существует",
+      "notFound": "Соавтор не найден",
+      "userNotFoundInCollaborator": "Пользователь не найден среди соавторов",
+      "noPermissionToDelete": "У вас нет разрешения на удаление этого соавтора",
+      "noPermissionToUpdate": "У вас нет разрешения на обновление этого соавтора",
+      "noPermissionToOperateRole": "У вас нет разрешения на управление этой ролью",
+      "alreadyExistedInBase": "Соавтор уже существует в базе данных",
+      "userNotFound": "Пользователь не найден: {{userIds}}",
+      "baseNotFound": "База данных не найдена",
+      "noPermissionToAddRole": "У вас нет разрешения на добавление соавтора с этой ролью",
+      "departmentNotFound": "Отдел не найден"
+    },
+    "table": {
+      "notFound": "Таблица не найдена",
+      "dbTableNameAlreadyExists": "Имя таблицы базы данных уже существует",
+      "anchorNotFound": "Якорная таблица не найдена",
+      "notInTrash": "Таблица не находится в корзине",
+      "notSupportTableIndex": "Тип индекса таблицы не поддерживается",
+      "createTableIndexError": "Не удалось создать индекс таблицы",
+      "dropTableIndexError": "Не удалось удалить индекс таблицы",
+      "notFoundPrimaryField": "Первичное поле не найдено в таблице"
+    },
+    "export": {
+      "notSupportViewType": "Тип представления {{viewType}} не поддерживается для экспорта"
+    },
+    "import": {
+      "notSupportedFileFormat": "Формат файла не поддерживается, поддерживаются только {{supportType}}, тип содержимого вашего файла {{fileFormat}}",
+      "notSupportedFileType": "Тип файла импорта не поддерживается",
+      "exceedMaxFieldsLength": "Количество полей в таблице не может превышать {{maxFieldsLength}}, текущее значение {{length}}",
+      "tooManyConcurrentImports": "Too many import tasks in progress ({{current}}/{{max}}). Please try again later."
+    },
+    "invitation": {
+      "disallowSpaceInvitation": "Текущий экземпляр запрещает приглашения в пространство администратором",
+      "invalidCode": "Неверный код приглашения",
+      "linkNotFound": "Ссылка приглашения не найдена",
+      "linkExpired": "Срок действия ссылки приглашения истек",
+      "limitExceeded": "Вы достигли максимального количества приглашений в час"
+    },
+    "pin": {
+      "alreadyExists": "Избранное уже существует",
+      "notFound": "Избранное не найдено",
+      "anchorNotFound": "Якорь избранного не найден"
+    },
+    "trash": {
+      "invalidResourceType": "Недопустимый тип ресурса",
+      "notFound": "Элемент корзины не найден",
+      "parentSpaceTrashed": "Невозможно восстановить эту базу, так как её родительское пространство также находится в корзине",
+      "parentBaseOrSpaceTrashed": "Невозможно восстановить эту таблицу, так как её родительская база или пространство также находится в корзине",
+      "parentBaseTrashed": "Невозможно восстановить этот элемент, так как его родительская база также находится в корзине",
+      "parentNotFound": "Родительский ресурс не найден",
+      "tableNotFound": "Элемент корзины таблицы не найден"
+    },
+    "license": {
+      "invalid": "Лицензия недействительна",
+      "instanceIdMismatch": "Входящий ID экземпляра не соответствует ID экземпляра текущего экземпляра",
+      "expired": "Лицензия истекла",
+      "userLimitExceeded": "Количество пользователей в текущем экземпляре превышает лимит мест лицензии. Пожалуйста, отключите некоторых пользователей или обновите лицензию"
+    },
+    "domainVerification": {
+      "notFound": "Код подтверждения домена не найден",
+      "invalidCode": "Неверный код подтверждения",
+      "resendCooldown": "Пожалуйста, подождите 1 минуту перед запросом нового кода",
+      "alreadyVerified": "Домен уже подтверждён"
+    },
+    "organization": {
+      "notFound": "Организация не найдена",
+      "authenticationNotFound": "Аутентификация не найдена",
+      "spaceShouldExist": "Пространство организации должно существовать",
+      "emailsNotInOrgDomain": "Эти электронные адреса {{emails}} не находятся в домене организации",
+      "emailNotSpaceUser": "Email не является пользователем пространства"
+    },
+    "mail": {
+      "failedToSendEmail": "Не удалось отправить электронное письмо"
+    },
+    "user": {
+      "disallowSignUp": "Текущий экземпляр запрещает регистрацию администратором",
+      "emailDomainBanned": "Этот почтовый домен заблокирован за нарушение правил",
+      "waitlistInviteCodeRequired": "Список ожидания включен, требуется код приглашения",
+      "waitlistInviteCodeInvalid": "Список ожидания включен, код приглашения недействителен",
+      "systemUser": "Пользователь является системным пользователем",
+      "collaboratorsInSpaces": "У пользователя есть сотрудники в пространствах (или удаленные пространства в корзине)",
+      "notFound": "Пользователь не найден",
+      "cannotDeleteAdmin": "Невозможно удалить пользователя-администратора",
+      "cannotDeactivateAdmin": "Невозможно отключить пользователя-администратора",
+      "cannotRemoveLastAdmin": "Невозможно убрать права администратора у последнего активного пользователя-администратора",
+      "permanentDeleted": "Пользователь навсегда удален",
+      "cannotDeleteSelf": "Вы не можете удалить себя",
+      "alreadyInDepartment": "Пользователь {{userId}} уже находится в целевом отделе",
+      "emailsNotFound": "Электронные адреса {{emails}} не найдены",
+      "deleted": "Пользователь {{userId}} удалены",
+      "alreadyInOrg": "Пользователь {{userId}} уже находится в организации",
+      "notInOrg": "Пользователь {{userId}} не находится в организации"
+    },
+    "record": {
+      "notFound": "Запись не найдена",
+      "deletedIdsNotFound": "Некоторые записи для удаления не найдены",
+      "updateFailed": "Не удалось обновить запись",
+      "noFileOrUrlProvided": "Файл или URL не предоставлен",
+      "createRecordsEmpty": "Создание записей не может быть пустым",
+      "duplicateFailed": "Не удалось дублировать запись"
+    },
+    "typecast": {
+      "cellValueValidationFailed": "Ошибка проверки значения ячейки"
+    },
+    "workflow": {
+      "notActive": "Автоматизация не открыта"
+    },
+    "lastVisit": {
+      "invalidResourceType": "Недопустимый тип ресурса"
+    },
+    "template": {
+      "categoryNotFound": "Категория шаблона не найдена",
+      "snapshotRequired": "Этот шаблон не может быть опубликован из-за отсутствия снимка",
+      "sourceTemplateNotFound": "Исходный шаблон не найден",
+      "noMinOrderFound": "Минимальный порядок не найден",
+      "takeCountTooLarge": "Количество запрошенных шаблонов превышает максимальный лимит",
+      "categoryLimitReached": "Достигнут лимит категорий шаблонов (максимум {{maxCount}})"
+    },
+    "department": {
+      "parentNotFound": "Родительский отдел не найден",
+      "notFound": "Отдел не найден",
+      "cannotMoveToItself": "Невозможно переместить отдел в самого себя",
+      "cannotMoveToSub": "Невозможно переместить отдел в его подотдел"
+    },
+    "app": {
+      "notFound": "Приложение не найдено",
+      "noFilesToUpdate": "Нет файлов для обновления",
+      "noChatIdFound": "ID чата для этого приложения не найден",
+      "noChatFound": "Чат для этого приложения не найден",
+      "versionNotFound": "Версия не найдена",
+      "cannotRollbackToLatestVersion": "Невозможно откатить к последней версии",
+      "noChatOrProjectTokenFound": "Чат или токен проекта не найден",
+      "apiKeyNotSet": "API-ключ конструктора приложений не установлен",
+      "cannotDeployAppBeforeInitialization": "Невозможно развернуть приложение до инициализации",
+      "noProjectOrVersionFound": "Проект или версия не найдены",
+      "noDeploymentUrlAvailable": "URL развертывания недоступен",
+      "noFilesInZip": "В ZIP-архиве файлы не найдены",
+      "zipFileTooLarge": "Размер ZIP-файла превышает лимит 5 МБ",
+      "invalidZip": "Недействительный ZIP-файл",
+      "domainAlreadyInUse": "Этот домен уже привязан к другому приложению",
+      "domainReserved": "Этот поддомен зарезервирован",
+      "siteInfoBeforeGeneration": "Сначала сгенерируйте приложение, затем настраивайте информацию о сайте",
+      "generationEditingConflict": "Генерация ИИ сейчас редактирует это приложение. Повторите обновление файла после её завершения.",
+      "siteInfoLayoutNotEditable": "Код этого приложения не рассчитан на изменение информации о сайте здесь. Вместо этого попросите ИИ в чате изменить заголовок, описание или значок сайта.",
+      "siteInfoManagedInCode": "Это приложение управляет заголовком и описанием сайта в коде. Вместо этого попросите ИИ в чате их изменить."
+    },
+    "reward": {
+      "notFound": "Награда не найдена",
+      "unsupportedSourceType": "Неподдерживаемый тип источника награды",
+      "maxClaimsReached": "Вы достигли максимального количества запросов наград (2) на этой неделе",
+      "verificationFailed": "Ошибка проверки: {{errors}}",
+      "alreadyClaimedThisWeek": "Вы уже запросили награду для этого аккаунта на этой неделе",
+      "invalidPostUrl": "Неверный формат URL публикации",
+      "postAlreadyUsed": "Эта публикация уже использовалась для получения награды",
+      "tooManyFailedAttempts": "Слишком много неудачных попыток проверки на этой неделе",
+      "unsupportedPlatformUrl": "Неподдерживаемый URL социальной платформы",
+      "unsupportedPlatform": "Неподдерживаемая платформа: {{platform}}",
+      "minCharCount": "Публикация должна содержать не менее {{count}} символов",
+      "minFollowerCount": "Аккаунт должен иметь не менее {{count}} подписчиков",
+      "mustMention": "Публикация должна упоминать {{mention}}",
+      "fetchTweetFailed": "Не удалось получить твит X: {{error}}",
+      "tweetNotFound": "Твит X не найден: {{postId}}",
+      "fetchUserFailed": "Не удалось получить пользователя X: {{error}}",
+      "xUserNotFound": "Пользователь X не найден: {{username}}",
+      "fetchLinkedInPostFailed": "Не удалось получить публикацию LinkedIn: {{error}}",
+      "linkedInPostNotFound": "Публикация LinkedIn не найдена: {{postId}}",
+      "linkedInAuthorNotFound": "Автор LinkedIn не найден: {{postId}}",
+      "fetchLinkedInUserFailed": "Не удалось получить пользователя LinkedIn: {{error}}"
+    }
+  },
+  "usageLimitBanner": {
+    "viewDetail": "Подробнее",
+    "rows": {
+      "title": "Это пространство использует {{current}} строк, что превышает лимит вашего тарифа — {{limit}}",
+      "titleIncrement": "Это действие добавит {{increment}} строк и превысит лимит вашего тарифа — {{limit}}",
+      "titleBatch": "Эта операция превысит лимит вашего тарифа — {{limit}} строк",
+      "description": "Больше записей добавить нельзя. Повысьте тариф, чтобы сразу снять ограничение, или освободите место, удалив записи.",
+      "unit": "строк"
+    },
+    "credit": {
+      "unit": "кредитов"
+    },
+    "attachments": {
+      "unit": "Вложения"
+    },
+    "generic": {
+      "description": "Повысьте тариф, чтобы снять это ограничение."
     }
   }
 }

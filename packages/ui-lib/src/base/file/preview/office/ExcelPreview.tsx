@@ -22,6 +22,8 @@ interface ISheetItem {
 
 interface IExcelPreviewProps extends IFileItemInner {}
 
+const DEFAULT_EMPTY_SHEET = [{ title: 'A', id: 'A' }];
+
 export const ExcelPreview = (props: IExcelPreviewProps) => {
   const { src, mimetype } = props;
   const [error, setError] = useState<string | null>(null);
@@ -37,17 +39,16 @@ export const ExcelPreview = (props: IExcelPreviewProps) => {
 
   const cols = useMemo(() => {
     if (!currentSheetData) {
-      return [];
+      return DEFAULT_EMPTY_SHEET;
     }
     const ref = currentSheetData['!ref'];
 
     if (!ref) {
-      return [];
+      return DEFAULT_EMPTY_SHEET;
     }
 
     const letter = getEndColumn(ref);
     const colNum = letterCoordinate2Number(letter!);
-
     return (
       Array.from({ length: colNum }).map((_, index) => ({
         title: numberCoordinate2Letter(index + 1),
@@ -103,8 +104,9 @@ export const ExcelPreview = (props: IExcelPreviewProps) => {
       if (setLoading) {
         setLoading(false);
       }
-      const rowData = currentSheetData?.[row] || {};
-      const cellData = (rowData?.[col] || {}) as XLSX.CellObject;
+      // Make sure rowData is a record with number keys and XLSX.CellObject values
+      const rowData = (currentSheetData?.['!data']?.[row] || {}) as Record<number, XLSX.CellObject>;
+      const cellData = rowData[col] || {};
 
       const value = (cellData?.w ?? cellData?.v ?? '') as string;
 
@@ -154,9 +156,9 @@ export const ExcelPreview = (props: IExcelPreviewProps) => {
             paddingBottom: 10,
           }}
           verticalBorder={true}
-          getCellContent={getData}
+          getCellContent={(cell) => getData(cell)}
           columns={cols}
-          rows={currentSheetData.length}
+          rows={currentSheetData?.['!data']?.length || 1}
         />
       )}
 

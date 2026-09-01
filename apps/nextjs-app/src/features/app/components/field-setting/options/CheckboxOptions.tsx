@@ -10,12 +10,12 @@ export const CheckboxOptions = (props: {
   const { isLookup, options, onChange } = props;
   const onDefaultValueChange = (defaultValue: boolean | undefined) => {
     onChange?.({
-      defaultValue: defaultValue || undefined,
+      defaultValue: defaultValue || null,
     });
   };
 
   return (
-    <div className="form-control space-y-2">
+    <div className="form-control space-y-4 border-t pt-4">
       {!isLookup && (
         <DefaultValue>
           <Checkbox

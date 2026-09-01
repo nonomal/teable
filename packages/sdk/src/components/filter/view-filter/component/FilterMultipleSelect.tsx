@@ -1,7 +1,8 @@
-import { ColorUtils } from '@teable/core';
-import { cn } from '@teable/ui-lib';
+import { useTheme } from '@teable/next-themes';
 import { useMemo } from 'react';
+import { useTranslation } from '../../../../context/app/i18n';
 import type { MultipleSelectField, SingleSelectField } from '../../../../model';
+import { getSelectColorPairs } from '../../../../utils/select-color';
 import type { IColorOption } from './base';
 import { BaseMultipleSelect } from './base';
 import { DefaultErrorLabel } from './DefaultErrorLabel';
@@ -13,10 +14,13 @@ interface IMultipleSelect {
   field: MultipleSelectField | SingleSelectField;
   className?: string;
   popoverClassName?: string;
+  modal?: boolean;
 }
 
 const FilterMultipleSelect = (props: IMultipleSelect) => {
-  const { field, value, onSelect, className, popoverClassName } = props;
+  const { t } = useTranslation();
+  const { field, value, onSelect, className, popoverClassName, modal } = props;
+  const { resolvedTheme } = useTheme();
   const values = useMemo(() => {
     if (Array.isArray(value) && value.length) {
       return value;
@@ -24,45 +28,48 @@ const FilterMultipleSelect = (props: IMultipleSelect) => {
     return [];
   }, [value]);
   const options = useMemo<IColorOption[]>(() => {
-    return field?.options?.choices.map((choice) => ({
+    return (field?.options?.choices ?? []).map((choice) => ({
       value: choice.name,
       label: choice.name,
       color: choice.color,
     }));
   }, [field]);
   const displayRender = (value: IColorOption) => {
+    const { color, backgroundColor } = getSelectColorPairs(value.color, resolvedTheme);
     return (
       <div
         key={value?.value}
-        className={cn('px-2 rounded-lg flex-1')}
+        className="flex h-5 w-fit max-w-full shrink-0 items-center overflow-hidden rounded-full px-2 text-xs font-normal"
         style={{
-          backgroundColor: ColorUtils.getHexForColor(value.color),
-          color: ColorUtils.shouldUseLightTextOnColor(value.color) ? '#ffffff' : '#000000',
+          backgroundColor,
+          color,
         }}
         title={value.label}
       >
-        {value.label}
+        <span className="min-w-0 flex-1 truncate">{value.label}</span>
       </div>
     );
   };
   const optionRender = (value: IColorOption) => {
+    const { color, backgroundColor } = getSelectColorPairs(value.color, resolvedTheme);
     return (
       <div
         key={value?.value}
-        className={cn('px-2 rounded-lg truncate')}
+        className="flex h-5 w-fit max-w-full items-center overflow-hidden rounded-full px-2 text-xs font-normal"
         style={{
-          backgroundColor: ColorUtils.getHexForColor(value.color),
-          color: ColorUtils.shouldUseLightTextOnColor(value.color) ? '#ffffff' : '#000000',
+          backgroundColor,
+          color,
         }}
         title={value.label}
       >
-        {value.label}
+        <span className="min-w-0 flex-1 truncate">{value.label}</span>
       </div>
     );
   };
 
   return (
     <BaseMultipleSelect
+      drawerTitle={t('filter.selectValue')}
       options={options}
       onSelect={onSelect}
       value={values}
@@ -71,7 +78,7 @@ const FilterMultipleSelect = (props: IMultipleSelect) => {
       className={className}
       popoverClassName={popoverClassName}
       defaultLabel={<DefaultErrorLabel />}
-      placeholderClassName="text-xs"
+      modal={modal}
     />
   );
 };

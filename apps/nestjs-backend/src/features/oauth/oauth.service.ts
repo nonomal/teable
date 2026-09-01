@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { generateClientId, getRandomString, nullsToUndefined } from '@teable/core';
+import { SYSTEM_USER_ID, generateClientId, getRandomString, nullsToUndefined } from '@teable/core';
 import { Prisma, PrismaService } from '@teable/db-main-prisma';
 import type {
   AuthorizedVo,
@@ -13,13 +13,16 @@ import type {
 import * as bcrypt from 'bcrypt';
 import { pick } from 'lodash';
 import { ClsService } from 'nestjs-cls';
+import { PerformanceCacheService } from '../../performance-cache';
+import { generateAccessTokenCacheKey } from '../../performance-cache/generate-keys';
 import type { IClsStore } from '../../types/cls';
 
 @Injectable()
 export class OAuthService {
   constructor(
     private readonly prismaService: PrismaService,
-    private readonly cls: ClsService<IClsStore>
+    private readonly cls: ClsService<IClsStore>,
+    private readonly performanceCacheService: PerformanceCacheService
   ) {}
 
   private convertToVo<T extends { scopes?: string | null; redirectUris?: string | null }>(ro: T) {
@@ -32,7 +35,7 @@ export class OAuthService {
 
   async createOAuth(ro: OAuthCreateRo): Promise<OAuthCreateVo> {
     const userId = this.cls.get('user.id');
-    const { redirectUris, name, description, scopes, homepage, logo } = ro;
+    const { redirectUris, name, description, scopes, homepage, logo, allowDeviceFlow } = ro;
     const res = await this.prismaService.oAuthApp.create({
       data: {
         name,
@@ -41,6 +44,7 @@ export class OAuthService {
         homepage,
         logo,
         redirectUris: redirectUris ? JSON.stringify(redirectUris) : null,
+        allowDeviceFlow,
         createdBy: userId,
         clientId: generateClientId(),
       },
@@ -54,6 +58,7 @@ export class OAuthService {
         'homepage',
         'logo',
         'redirectUris',
+        'allowDeviceFlow',
         'clientId',
       ])
     );
@@ -79,6 +84,7 @@ export class OAuthService {
   };
 
   async getOAuth(clientId: string): Promise<OAuthGetVo> {
+    await this.validateOwnership(clientId);
     const res = await this.prismaService.oAuthApp.findUnique({
       where: {
         clientId,
@@ -102,6 +108,7 @@ export class OAuthService {
           'homepage',
           'logo',
           'redirectUris',
+          'allowDeviceFlow',
           'clientId',
           'secrets',
         ]
@@ -110,7 +117,8 @@ export class OAuthService {
   }
 
   async updateOAuth(clientId: string, ro: OAuthCreateRo): Promise<OAuthUpdateVo> {
-    const { redirectUris, name, description, scopes, homepage, logo } = ro;
+    await this.validateOwnership(clientId);
+    const { redirectUris, name, description, scopes, homepage, logo, allowDeviceFlow } = ro;
     const res = await this.prismaService.oAuthApp.update({
       where: {
         clientId,
@@ -122,6 +130,8 @@ export class OAuthService {
         homepage,
         logo,
         redirectUris: redirectUris ? JSON.stringify(redirectUris) : null,
+        // undefined leaves the stored value untouched (Prisma skips it).
+        allowDeviceFlow,
       },
     });
 
@@ -136,25 +146,85 @@ export class OAuthService {
         'homepage',
         'logo',
         'redirectUris',
+        'allowDeviceFlow',
         'clientId',
       ])
     );
   }
 
-  async deleteOAuth(clientId: string): Promise<void> {
-    await this.prismaService.oAuthApp.delete({
+  private validateOwnership = async (clientId: string) => {
+    const app = await this.prismaService.oAuthApp.findUnique({
       where: {
         clientId,
       },
+      select: { createdBy: true },
     });
+    if (!app) {
+      throw new NotFoundException('OAuth client not found');
+    }
+    const user = this.cls.get('user');
+    if (user.isAdmin && SYSTEM_USER_ID === app.createdBy) {
+      return;
+    }
+    if (app.createdBy !== user.id) {
+      throw new ForbiddenException('No permission to operate on this OAuth client');
+    }
+  };
+
+  private async deleteAccessTokens(
+    tx: Prisma.TransactionClient,
+    where: Prisma.AccessTokenWhereInput
+  ) {
+    const accessTokens = await tx.accessToken.findMany({
+      where,
+      select: { id: true },
+    });
+    await tx.accessToken.deleteMany({ where });
+    return accessTokens.map(({ id }) => id);
+  }
+
+  private async invalidateAccessTokenCache(accessTokenIds: string[]) {
+    await Promise.all(
+      [...new Set(accessTokenIds)].map((id) =>
+        this.performanceCacheService.del(generateAccessTokenCacheKey(id))
+      )
+    );
+  }
+
+  async deleteOAuth(clientId: string): Promise<void> {
+    await this.validateOwnership(clientId);
+    const accessTokenIds = await this.prismaService.$tx(async (prisma) => {
+      const accessTokens = await prisma.accessToken.findMany({
+        where: { clientId },
+        select: { id: true },
+      });
+      await prisma.oAuthApp.delete({
+        where: {
+          clientId,
+        },
+      });
+      await prisma.accessToken.deleteMany({
+        where: {
+          clientId,
+        },
+      });
+      return accessTokens.map(({ id }) => id);
+    });
+    await this.invalidateAccessTokenCache(accessTokenIds);
   }
 
   async getOAuthList(): Promise<OAuthGetListVo> {
     const userId = this.cls.get('user.id');
+    const isAdmin = this.cls.get('user.isAdmin');
+    const where: Prisma.OAuthAppWhereInput = isAdmin
+      ? {
+          OR: [{ createdBy: userId }, { createdBy: SYSTEM_USER_ID }],
+        }
+      : {
+          createdBy: userId,
+        };
     const res = await this.prismaService.oAuthApp.findMany({
-      where: {
-        createdBy: userId,
-      },
+      where,
       select: {
         clientId: true,
         name: true,
@@ -167,6 +237,7 @@ export class OAuthService {
   }
 
   async generateSecret(clientId: string): Promise<GenerateOAuthSecretVo> {
+    await this.validateOwnership(clientId);
     const secret = getRandomString(40).toLocaleLowerCase();
     const hashedSecret = await bcrypt.hash(secret, 10);
 
@@ -191,6 +262,7 @@ export class OAuthService {
   }
 
   async deleteSecret(clientId: string, secretId: string): Promise<void> {
+    await this.validateOwnership(clientId);
     await this.prismaService.oAuthAppSecret.delete({
       where: {
         id: secretId,
@@ -200,30 +272,39 @@ export class OAuthService {
   }
 
   async revokeAccess(clientId: string) {
-    // validate clientId is match with current user
-    const currentUserId = this.cls.get('user.id');
-    const app = await this.prismaService.oAuthApp.findFirst({
-      where: { clientId, createdBy: currentUserId },
+    await this.validateOwnership(clientId);
+    const accessTokenIds = await this.prismaService.$tx(async (prisma) => {
+      await prisma.oAuthAppAuthorized.deleteMany({
+        where: { clientId },
+      });
+      await prisma.oAuthAppToken.deleteMany({
+        where: {
+          clientId,
+        },
+      });
+      return await this.deleteAccessTokens(prisma, { clientId });
     });
-    if (!app) {
-      throw new ForbiddenException('No permission to revoke access: ' + clientId);
-    }
-    await this.prismaService.$tx(async () => {
-      await this.prismaService.txClient().oAuthAppAuthorized.deleteMany({
-        where: { clientId },
+    await this.invalidateAccessTokenCache(accessTokenIds);
+  }
+
+  async revokeToken(clientId: string) {
+    const userId = this.cls.get('user.id');
+    const accessTokenIds = await this.prismaService.$tx(async (prisma) => {
+      await prisma.oAuthAppAuthorized.delete({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        where: { clientId_userId: { clientId, userId } },
       });
-      const secrets = await this.prismaService.txClient().oAuthAppSecret.findMany({
-        where: { clientId },
+
+      await prisma.oAuthAppToken.deleteMany({
+        where: {
+          createdBy: userId,
+          clientId,
+        },
       });
-      const secretIds = secrets.map((s) => s.id);
-      await this.prismaService.txClient().oAuthAppToken.deleteMany({
-        where: { appSecretId: { in: secretIds } },
-      });
-      // delete access token
-      await this.prismaService.txClient().accessToken.deleteMany({
-        where: { clientId },
-      });
+
+      return await this.deleteAccessTokens(prisma, { clientId, userId });
     });
+    await this.invalidateAccessTokenCache(accessTokenIds);
   }
 
   async getAuthorizedList(): Promise<AuthorizedVo[]> {
@@ -307,7 +388,11 @@ export class OAuthService {
         homepage: c.homepage,
         scopes: c.scopes,
         lastUsedTime: lastUsedTimeMap[c.clientId]?.lastUsedTime,
-        createdUser: userMap[c.createdBy],
+        createdUser:
+          userMap[c.createdBy] ??
+          (c.createdBy === 'system'
+            ? { name: 'System', email: 'system@teable.ai' }
+            : { name: 'Unknown', email: '' }),
       })
     );
   }

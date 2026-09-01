@@ -54,8 +54,8 @@ export const CreateDashboardDialog = forwardRef<
       onSuccess: (res) => {
         setOpen(false);
         setName('');
-        queryClient.invalidateQueries(ReactQueryKeys.getDashboardList(baseId));
-        router.push(`/base/${baseId}/dashboard?id=${res.data.id}`);
+        queryClient.invalidateQueries({ queryKey: ReactQueryKeys.getDashboardList(baseId) });
+        router.push(`/base/${baseId}/dashboard/${res.data.id}`);
         if (onSuccessCallback) {
           onSuccessCallback?.(res.data.id);
         }
@@ -86,7 +86,7 @@ export const CreateDashboardDialog = forwardRef<
                   .min(1)
                   .safeParse(name || undefined);
                 if (!valid.success) {
-                  setError(valid.error.errors?.[0].message);
+                  setError(valid.error.issues?.[0]?.message);
                   return;
                 }
                 createDashboardMutate(name);

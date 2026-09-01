@@ -14,7 +14,6 @@ interface INotificationProviderProps {
 export const NotificationProvider: FC<INotificationProviderProps> = ({ children }) => {
   const { user } = useSession();
   const { connection } = useConnection();
-
   const [remotePresence, setRemotePresence] = useState<Presence>();
   const [notification, setNotification] = useState<INotificationBuffer | null>(null);
 

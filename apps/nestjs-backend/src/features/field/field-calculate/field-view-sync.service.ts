@@ -1,5 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { getValidFilterOperators, FieldType, ViewOpBuilder, FieldOpBuilder } from '@teable/core';
+import {
+  getValidFilterOperators,
+  FieldType,
+  ViewOpBuilder,
+  FieldOpBuilder,
+  getValidStatisticFunc,
+  ViewType,
+} from '@teable/core';
 import type {
   IFilterSet,
   ISelectFieldOptionsRo,
@@ -9,12 +16,15 @@ import type {
   IFilterValue,
   ILinkFieldOptions,
   IOtOperation,
+  IColumn,
 } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import { isEqual, differenceBy, find, isEmpty } from 'lodash';
 import { ViewService } from '../../view/view.service';
 import { FieldService } from '../field.service';
 import type { IFieldInstance } from '../model/factory';
+import { FieldConvertingLinkService } from './field-converting-link.service';
+import { FieldDeletingService } from './field-deleting.service';
 
 /**
  * This service' purpose is to sync the relative data from field to view
@@ -27,7 +37,9 @@ export class FieldViewSyncService {
   constructor(
     private readonly viewService: ViewService,
     private readonly fieldService: FieldService,
-    private readonly prismaService: PrismaService
+    private readonly prismaService: PrismaService,
+    private readonly fieldDeletingService: FieldDeletingService,
+    private readonly fieldConvertingLinkService: FieldConvertingLinkService
   ) {}
 
   async deleteDependenciesByFieldIds(tableId: string, fieldIds: string[]) {
@@ -120,6 +132,33 @@ export class FieldViewSyncService {
   ) {
     await this.convertViewDependenciesByFieldIds(tableId, newField, oldField);
     await this.convertLinkOptionsDependenciesByFieldIds(tableId, newField, oldField);
+    await this.convertLinkLookupFieldId(tableId, newField);
+  }
+
+  async convertLinkLookupFieldId(tableId: string, newField: IFieldInstance) {
+    const prisma = this.prismaService.txClient();
+    const fieldId = newField.id;
+    const resetLinkFieldIds = await this.fieldConvertingLinkService.planResetLinkFieldLookupFieldId(
+      tableId,
+      newField,
+      'field|update'
+    );
+
+    if (isEmpty(resetLinkFieldIds)) {
+      return;
+    }
+
+    await prisma.reference.deleteMany({
+      where: {
+        fromFieldId: fieldId,
+      },
+    });
+
+    await this.fieldDeletingService.resetLinkFieldLookupFieldId(
+      resetLinkFieldIds,
+      tableId,
+      fieldId
+    );
   }
 
   async convertLinkOptionsDependenciesByFieldIds(
@@ -157,6 +196,7 @@ export class FieldViewSyncService {
     }
   }
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   async convertViewDependenciesByFieldIds(
     tableId: string,
     newField: IFieldInstance,
@@ -167,32 +207,85 @@ export class FieldViewSyncService {
         filter: true,
         id: true,
         type: true,
+        columnMeta: true,
       },
-      where: { tableId: tableId },
+      where: { tableId: tableId, deletedTime: null },
     });
 
     if (!views?.length) {
       return;
     }
 
+    const opsMap: { [viewId: string]: IOtOperation[] } = {};
     for (let i = 0; i < views.length; i++) {
-      const filterString = views[i].filter;
-      // empty filter or the field is not in filter, skip
-      if (!filterString || !filterString?.includes(newField.id)) {
-        continue;
+      const view = views[i];
+      const viewId = view.id;
+      const filterString = view.filter;
+
+      // if the field is in filter, update the filter
+      if (filterString?.includes(newField.id)) {
+        const filter = JSON.parse(filterString) as NonNullable<IFilter>;
+
+        const newFilter = this.getNewFilterByFieldChanges(filter, newField, oldField);
+
+        const ops = ViewOpBuilder.editor.setViewProperty.build({
+          key: 'filter',
+          newValue: newFilter ? (newFilter?.filterSet?.length ? newFilter : null) : null,
+          oldValue: filter,
+        });
+        opsMap[viewId] = [ops];
       }
-      const filter = JSON.parse(filterString) as NonNullable<IFilter>;
 
-      const newFilter = this.getNewFilterByFieldChanges(filter, newField, oldField);
+      // clear invalid aggregation statisticFunc from columnMeta
+      const columnMetaString = view?.columnMeta;
+      if (columnMetaString) {
+        const columnMeta = JSON.parse(columnMetaString) as {
+          [fieldId: string]: IColumn | null;
+        };
+        const fieldId = newField.id;
+        const meta = columnMeta[fieldId];
+        if (meta && 'statisticFunc' in meta) {
+          const validFuncs = getValidStatisticFunc(newField);
+          const currentFunc = meta.statisticFunc as unknown;
+          if (
+            currentFunc &&
+            Array.isArray(validFuncs) &&
+            !validFuncs.includes(currentFunc as never)
+          ) {
+            const updateOp = ViewOpBuilder.editor.updateViewColumnMeta.build({
+              fieldId,
+              newColumnMeta: { ...meta, statisticFunc: null },
+              oldColumnMeta: { ...meta },
+            });
+            opsMap[viewId] = [...(opsMap[viewId] || []), updateOp];
+          }
+        }
 
-      const ops = ViewOpBuilder.editor.setViewProperty.build({
-        key: 'filter',
-        newValue: newFilter ? (newFilter?.filterSet?.length ? newFilter : null) : null,
-        oldValue: filter,
-      });
+        // For Form views: enforce visibility when field is not null and no default value
+        if (view.type === ViewType.Form) {
+          const defaultValue = (newField.options as { defaultValue?: string })?.defaultValue;
+          const protectedNew = Boolean(newField.notNull) && !defaultValue;
+          const defaultValueOld = (
+            oldField.options as {
+              defaultValue?: string;
+            }
+          )?.defaultValue;
+          const protectedOld = Boolean(oldField.notNull) && !defaultValueOld;
 
-      await this.viewService.updateViewByOps(tableId, views[i].id, [ops]);
+          if (protectedNew && !protectedOld) {
+            const prev = columnMeta[fieldId] ?? {};
+            const updateOp = ViewOpBuilder.editor.updateViewColumnMeta.build({
+              fieldId,
+              newColumnMeta: { ...prev, visible: true } as IColumn,
+              oldColumnMeta: prev as IColumn,
+            });
+            opsMap[viewId] = [...(opsMap[viewId] || []), updateOp];
+          }
+        }
+      }
     }
+
+    await this.viewService.batchUpdateViewByOps(tableId, opsMap);
   }
 
   async getLinkForeignFields(tableId: string) {
@@ -259,7 +352,7 @@ export class FieldViewSyncService {
         });
       const deleteOptions = differenceBy(oldOptions, newOptions, 'id');
       if (!deleteOptions?.length && !updateNameOptions?.length) {
-        return;
+        return filter;
       }
 
       return this.getFilterBySelectTypeChanges(filter, fieldId, updateNameOptions, deleteOptions);

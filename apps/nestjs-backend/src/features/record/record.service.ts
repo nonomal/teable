@@ -1,18 +1,21 @@
+/* eslint-disable sonarjs/no-duplicate-string */
 /* eslint-disable @typescript-eslint/naming-convention */
-import {
-  BadRequestException,
-  Injectable,
-  InternalServerErrorException,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nestjs';
 import type {
+  CreatedByFieldCore,
+  FieldCore,
   IAttachmentCellValue,
   IColumnMeta,
   IExtraResult,
   IFilter,
+  IFilterItem,
   IFilterSet,
+  IGridColumnMeta,
   IGroup,
+  ILinkFieldOptions,
   ILinkCellValue,
   IRecord,
   ISnapshotBase,
@@ -21,58 +24,96 @@ import type {
 import {
   and,
   CellFormat,
+  DbFieldType,
+  DriverClient,
+  extractFieldIdsFromFilter,
   FieldKeyType,
   FieldType,
   generateRecordId,
+  HttpErrorCode,
   identify,
   IdPrefix,
+  isImage,
+  isPdf,
   mergeFilter,
   mergeWithDefaultFilter,
   mergeWithDefaultSort,
   or,
   parseGroup,
   Relationship,
+  StatisticsFunc,
+  TableDomain,
 } from '@teable/core';
-import type { Prisma } from '@teable/db-main-prisma';
 import { PrismaService } from '@teable/db-main-prisma';
 import type {
   ICreateRecordsRo,
   IGetRecordQuery,
   IGetRecordsRo,
   IGroupHeaderPoint,
+  IGroupHeaderRef,
   IGroupPoint,
   IGroupPointsVo,
+  IRecordGetCollaboratorsRo,
+  IRecordStatusVo,
   IRecordsVo,
 } from '@teable/openapi';
-import { GroupPointType, UploadType } from '@teable/openapi';
+import { DEFAULT_MAX_SEARCH_FIELD_COUNT, GroupPointType, UploadType } from '@teable/openapi';
 import { Knex } from 'knex';
-import { difference, keyBy } from 'lodash';
+import { get, difference, keyBy, orderBy, uniqBy, toNumber } from 'lodash';
 import { InjectModel } from 'nest-knexjs';
 import { ClsService } from 'nestjs-cls';
 import { CacheService } from '../../cache/cache.service';
 import { ThresholdConfig, IThresholdConfig } from '../../configs/threshold.config';
+import { CustomHttpException } from '../../custom.exception';
 import { InjectDbProvider } from '../../db-provider/db.provider';
 import { IDbProvider } from '../../db-provider/db.provider.interface';
+import { DatabaseRouter } from '../../global/database-router.service';
+import { DATA_KNEX } from '../../global/knex/knex.module';
 import { RawOpType } from '../../share-db/interface';
 import type { IClsStore } from '../../types/cls';
 import { convertValueToStringify, string2Hash } from '../../utils';
+import { handleDBValidationErrors } from '../../utils/db-validation-error';
 import { generateFilterItem } from '../../utils/filter';
 import {
   generateTableThumbnailPath,
   getTableThumbnailToken,
-} from '../../utils/generate-table-thumbnail-path';
+} from '../../utils/generate-thumbnail-path';
 import { Timing } from '../../utils/timing';
 import { AttachmentsStorageService } from '../attachments/attachments-storage.service';
 import StorageAdapter from '../attachments/plugins/adapter';
+import {
+  getFreshPreviewCacheUrl,
+  getPreviewCacheKey,
+  getPublicFullStorageUrl,
+} from '../attachments/plugins/utils';
+import { resolveThumbnailMimetype } from '../attachments/utils';
 import { BatchService } from '../calculation/batch.service';
+import { DataLoaderService } from '../data-loader/data-loader.service';
 import type { IVisualTableDefaultField } from '../field/constant';
-import { preservedDbFieldNames } from '../field/constant';
 import type { IFieldInstance } from '../field/model/factory';
 import { createFieldInstanceByRaw } from '../field/model/factory';
+import { UserFieldDto } from '../field/model/field-dto/user-field.dto';
+import { TableIndexService } from '../table/table-index.service';
 import { ROW_ORDER_FIELD_PREFIX } from '../view/constant';
-import { IFieldRaws } from './type';
+import { InjectRecordQueryBuilder, IRecordQueryBuilder } from './query-builder';
+import { RecordPermissionService } from './record-permission.service';
 
 type IUserFields = { id: string; dbFieldName: string }[];
+type IGeneratedColumnMeta = { meta?: { persistedAsGeneratedColumn?: boolean } };
+type IGeneratedColumnStateRow = {
+  column_name: string;
+  is_generated: string | null;
+};
+type IAttachmentCellValueLike = IAttachmentCellValue | IAttachmentCellValue[number];
+type IRecordsPresignedUrlContext = {
+  tableId?: string;
+  viewQueryDbTableName?: string;
+  fieldKeyType: FieldKeyType;
+  cellFormat?: CellFormat;
+  useQueryModel?: boolean;
+  recordIds?: string[];
+  projectionFieldIds?: string[];
+};
 
 function removeUndefined<T extends Record<string, unknown>>(obj: T) {
   return Object.fromEntries(Object.entries(obj).filter(([_, v]) => v !== undefined)) as T;
@@ -95,24 +136,141 @@ export class RecordService {
 
   constructor(
     private readonly prismaService: PrismaService,
+    private readonly databaseRouter: DatabaseRouter,
     private readonly batchService: BatchService,
     private readonly cls: ClsService<IClsStore>,
     private readonly cacheService: CacheService,
     private readonly attachmentStorageService: AttachmentsStorageService,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex,
+    private readonly recordPermissionService: RecordPermissionService,
+    private readonly tableIndexService: TableIndexService,
+    @InjectModel(DATA_KNEX) private readonly knex: Knex,
     @InjectDbProvider() private readonly dbProvider: IDbProvider,
-    @ThresholdConfig() private readonly thresholdConfig: IThresholdConfig
+    @ThresholdConfig() private readonly thresholdConfig: IThresholdConfig,
+    private readonly dataLoaderService: DataLoaderService,
+    @InjectRecordQueryBuilder() private readonly recordQueryBuilder: IRecordQueryBuilder,
+    private readonly eventEmitter: EventEmitter2
   ) {}
+
+  /**
+   * Get the database column name to query for a field
+   * For lookup formula fields, use the standard field name
+   */
+  private getQueryColumnName(field: IFieldInstance): string {
+    return field.dbFieldName;
+  }
+
+  private getBaseIdFromDbTableName(dbTableName: string) {
+    return this.dbProvider.splitTableName(dbTableName)[0];
+  }
+
+  private async queryDataTableByPhysicalName<T = unknown>(
+    dbTableName: string,
+    query: string,
+    ...values: unknown[]
+  ) {
+    return this.databaseRouter.queryDataPrismaForBase<T>(
+      this.getBaseIdFromDbTableName(dbTableName),
+      query,
+      ...values
+    );
+  }
+
+  private async getWritableGeneratedAwareFieldNames(
+    tableId: string,
+    dbTableName: string,
+    fields: readonly FieldCore[],
+    fieldType: FieldType.CreatedTime | FieldType.CreatedBy
+  ): Promise<Set<string>> {
+    const candidateFields = fields.filter((field) => field.type === fieldType && !field.isLookup);
+    if (!candidateFields.length) {
+      return new Set<string>();
+    }
+
+    const fallbackWritableFieldNames = new Set(
+      candidateFields
+        .filter((field) => {
+          if (fieldType === FieldType.CreatedBy) {
+            return (field as CreatedByFieldCore).shouldPersistAuditValue?.() !== false;
+          }
+          return (field as IGeneratedColumnMeta).meta?.persistedAsGeneratedColumn !== true;
+        })
+        .map((field) => field.dbFieldName)
+    );
+
+    if (this.dbProvider.driver !== DriverClient.Pg) {
+      return fallbackWritableFieldNames;
+    }
+
+    const [schemaName, tableName] = this.dbProvider.splitTableName(dbTableName);
+    const sqlNative = this.knex('information_schema.columns')
+      .select<IGeneratedColumnStateRow[]>('column_name', 'is_generated')
+      .where({
+        table_schema: schemaName,
+        table_name: tableName,
+      })
+      .whereIn(
+        'column_name',
+        candidateFields.map((field) => field.dbFieldName)
+      )
+      .toSQL()
+      .toNative();
+
+    const rows = await this.databaseRouter.queryDataPrismaForTable<IGeneratedColumnStateRow[]>(
+      tableId,
+      sqlNative.sql,
+      ...sqlNative.bindings
+    );
+    const columnStateMap = new Map(rows.map((row) => [row.column_name, row.is_generated]));
+
+    return new Set(
+      candidateFields
+        .filter((field) => {
+          const isGenerated = columnStateMap.get(field.dbFieldName);
+          if (isGenerated == null) {
+            return fallbackWritableFieldNames.has(field.dbFieldName);
+          }
+          return isGenerated === 'NEVER';
+        })
+        .map((field) => field.dbFieldName)
+    );
+  }
+
+  private async getWritableCreatedTimeFieldNames(
+    tableId: string,
+    dbTableName: string,
+    fields: readonly FieldCore[]
+  ): Promise<Set<string>> {
+    return this.getWritableGeneratedAwareFieldNames(
+      tableId,
+      dbTableName,
+      fields,
+      FieldType.CreatedTime
+    );
+  }
+
+  private async getWritableCreatedByFieldNames(
+    tableId: string,
+    dbTableName: string,
+    fields: readonly FieldCore[]
+  ): Promise<Set<string>> {
+    return this.getWritableGeneratedAwareFieldNames(
+      tableId,
+      dbTableName,
+      fields,
+      FieldType.CreatedBy
+    );
+  }
 
   private dbRecord2RecordFields(
     record: IRecord['fields'],
     fields: IFieldInstance[],
-    fieldKeyType?: FieldKeyType,
+    fieldKeyType: FieldKeyType = FieldKeyType.Id,
     cellFormat: CellFormat = CellFormat.Json
   ) {
     return fields.reduce<IRecord['fields']>((acc, field) => {
-      const fieldNameOrId = fieldKeyType === FieldKeyType.Name ? field.name : field.id;
-      const dbCellValue = record[field.dbFieldName];
+      const fieldNameOrId = field[fieldKeyType];
+      const queryColumnName = this.getQueryColumnName(field);
+      const dbCellValue = record[queryColumnName];
       const cellValue = field.convertDBValue2CellValue(dbCellValue);
       if (cellValue != null) {
         acc[fieldNameOrId] =
@@ -122,12 +280,111 @@ export class RecordService {
     }, {});
   }
 
-  async getAllRecordCount(dbTableName: string) {
+  /**
+   * Resolve display titles for user-like cells that carry no usable title —
+   * bare user-id cells and system-synthesized audit cells (track-all
+   * LastModifiedBy/CreatedBy snapshots are not persisted, so the SQL fallback
+   * shapes `{id, title: id}`). Stored point-in-time titles are preserved.
+   * Operates on raw db rows so both Json and Text cell formats resolve.
+   */
+  private async hydrateUnresolvedUserCellTitles(
+    rows: Record<string, unknown>[],
+    fields: IFieldInstance[]
+  ): Promise<void> {
+    if (!rows.length) {
+      return;
+    }
+    const userLikeColumns = fields
+      .filter((field) =>
+        [FieldType.User, FieldType.CreatedBy, FieldType.LastModifiedBy].includes(field.type)
+      )
+      .map((field) => this.getQueryColumnName(field));
+    if (!userLikeColumns.length) {
+      return;
+    }
+
+    const isUnresolvedUserId = (cell: unknown): cell is { id: string } => {
+      if (!cell || typeof cell !== 'object' || Array.isArray(cell)) {
+        return false;
+      }
+      const { id, title } = cell as { id?: unknown; title?: unknown };
+      return (
+        typeof id === 'string' &&
+        id.startsWith(IdPrefix.User) &&
+        (typeof title !== 'string' || title === id)
+      );
+    };
+    const collectUnresolvedIds = (value: unknown, target: Set<string>) => {
+      if (Array.isArray(value)) {
+        value.forEach((item) => collectUnresolvedIds(item, target));
+        return;
+      }
+      if (isUnresolvedUserId(value)) {
+        target.add(value.id);
+      }
+    };
+
+    const unresolvedIds = new Set<string>();
+    for (const row of rows) {
+      for (const column of userLikeColumns) {
+        collectUnresolvedIds(row[column], unresolvedIds);
+      }
+    }
+    if (!unresolvedIds.size) {
+      return;
+    }
+
+    const users = await this.prismaService.txClient().user.findMany({
+      where: { id: { in: [...unresolvedIds] } },
+      select: { id: true, name: true, email: true },
+    });
+    if (!users.length) {
+      return;
+    }
+    const userMap = new Map(users.map((user) => [user.id, user]));
+
+    const resolveCellValue = (value: unknown): unknown => {
+      if (Array.isArray(value)) {
+        return value.map((item) => resolveCellValue(item));
+      }
+      if (!isUnresolvedUserId(value)) {
+        return value;
+      }
+      const user = userMap.get(value.id);
+      if (!user) {
+        return value;
+      }
+      const cell = value as { id: string; email?: unknown };
+      return {
+        ...cell,
+        title: user.name,
+        ...(typeof cell.email === 'string' ? {} : { email: user.email }),
+      };
+    };
+
+    for (const row of rows) {
+      for (const column of userLikeColumns) {
+        if (row[column] != null) {
+          row[column] = resolveCellValue(row[column]);
+        }
+      }
+    }
+  }
+
+  async getAllRecordCount(dbTableName: string, tableId?: string) {
     const sqlNative = this.knex(dbTableName).count({ count: '*' }).toSQL().toNative();
 
-    const queryResult = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ count?: number }[]>(sqlNative.sql, ...sqlNative.bindings);
+    const queryResult = tableId
+      ? await this.databaseRouter.queryDataPrismaForTable<{ count?: number }[]>(
+          tableId,
+          sqlNative.sql,
+          ...sqlNative.bindings
+        )
+      : await this.queryDataTableByPhysicalName<{ count?: number }[]>(
+          dbTableName,
+          sqlNative.sql,
+          ...sqlNative.bindings
+        );
     return Number(queryResult[0]?.count ?? 0);
   }
 
@@ -169,36 +426,42 @@ export class RecordService {
         select: { dbTableName: true },
       })
       .catch(() => {
-        throw new NotFoundException(`Table ${tableId} not found`);
+        throw new CustomHttpException('Table not found', HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.table.notFound',
+          },
+        });
       });
     return tableMeta.dbTableName;
   }
 
   private async getLinkCellIds(tableId: string, field: IFieldInstance, recordId: string) {
     const prisma = this.prismaService.txClient();
-    const dbTableName = await prisma.tableMeta.findFirstOrThrow({
+    const { dbTableName } = await prisma.tableMeta.findFirstOrThrow({
       where: { id: tableId },
       select: { dbTableName: true },
     });
-    const linkCellQuery = this.knex(dbTableName)
-      .select({
-        id: '__id',
-        linkField: field.dbFieldName,
-      })
-      .where('__id', recordId)
-      .toQuery();
 
-    const result = await prisma.$queryRawUnsafe<
+    const { qb: queryBuilder } = await this.recordQueryBuilder.createRecordQueryBuilder(
+      dbTableName,
       {
-        id: string;
-        linkField: string | null;
-      }[]
-    >(linkCellQuery);
+        tableId,
+        viewId: undefined,
+        restrictRecordIds: [recordId],
+        useQueryModel: true,
+      }
+    );
+    const sql = queryBuilder.where('__id', recordId).toQuery();
+
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { id: string; [key: string]: unknown }[]
+    >(tableId, sql);
     return result
-      .map(
-        (item) =>
-          field.convertDBValue2CellValue(item.linkField) as ILinkCellValue | ILinkCellValue[]
-      )
+      .map((item) => {
+        return field.convertDBValue2CellValue(item[field.dbFieldName]) as
+          | ILinkCellValue
+          | ILinkCellValue[];
+      })
       .filter(Boolean)
       .flat()
       .map((item) => item.id);
@@ -216,7 +479,11 @@ export class RecordService {
         where: { id: fieldId, deletedTime: null },
       })
       .catch(() => {
-        throw new NotFoundException(`Field ${fieldId} not found`);
+        throw new CustomHttpException(`Field ${fieldId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.field.notFound',
+          },
+        });
       });
     const field = createFieldInstanceByRaw(fieldRaw);
     if (!field.isMultipleCellValue) {
@@ -228,7 +495,6 @@ export class RecordService {
       return;
     }
 
-    // sql capable for sqlite
     const valuesQuery = ids
       .map((id, index) => `SELECT ${index + 1} AS sort_order, '${id}' AS id`)
       .join(' UNION ALL ');
@@ -253,6 +519,7 @@ export class RecordService {
     queryBuilder: Knex.QueryBuilder,
     tableId: string,
     dbTableName: string,
+    alias: string,
     filterLinkCellSelected: [string, string] | string
   ) {
     const prisma = this.prismaService.txClient();
@@ -266,23 +533,43 @@ export class RecordService {
         where: { id: fieldId, deletedTime: null },
       })
       .catch(() => {
-        throw new NotFoundException(`Field ${fieldId} not found`);
+        throw new CustomHttpException(`Field ${fieldId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.field.notFound',
+          },
+        });
       });
 
     const field = createFieldInstanceByRaw(fieldRaw);
 
     if (field.type !== FieldType.Link) {
-      throw new BadRequestException('You can only filter by link field');
+      throw new CustomHttpException(
+        'You can only filter by link field',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.field.onlyLinkFieldCanBeFiltered',
+          },
+        }
+      );
     }
     const { foreignTableId, fkHostTableName, selfKeyName, foreignKeyName } = field.options;
     if (foreignTableId !== tableId) {
-      throw new BadRequestException('Field is not linked to current table');
+      throw new CustomHttpException(
+        'Field is not linked to current table',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.field.notLinkedToCurrentTable',
+          },
+        }
+      );
     }
 
     if (fkHostTableName !== dbTableName) {
       queryBuilder.leftJoin(
         `${fkHostTableName}`,
-        `${dbTableName}.__id`,
+        `${alias}.__id`,
         '=',
         `${fkHostTableName}.${foreignKeyName}`
       );
@@ -295,16 +582,15 @@ export class RecordService {
     }
 
     if (recordId) {
-      queryBuilder.where(`${dbTableName}.${selfKeyName}`, recordId);
+      queryBuilder.where(`${alias}.${selfKeyName}`, recordId);
       return;
     }
-    queryBuilder.whereNotNull(`${dbTableName}.${selfKeyName}`);
+    queryBuilder.whereNotNull(`${alias}.${selfKeyName}`);
   }
 
   async buildLinkCandidateQuery(
     queryBuilder: Knex.QueryBuilder,
     tableId: string,
-    dbTableName: string,
     filterLinkCellCandidate: [string, string] | string
   ) {
     const prisma = this.prismaService.txClient();
@@ -320,42 +606,71 @@ export class RecordService {
         where: { id: fieldId, deletedTime: null },
       })
       .catch(() => {
-        throw new NotFoundException(`Field ${fieldId} not found`);
+        throw new CustomHttpException(`Field ${fieldId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.field.notFound',
+          },
+        });
       });
 
     const field = createFieldInstanceByRaw(fieldRaw);
 
     if (field.type !== FieldType.Link) {
-      throw new BadRequestException('You can only filter by link field');
+      throw new CustomHttpException(
+        'You can only filter by link field',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.field.onlyLinkFieldCanBeFiltered',
+          },
+        }
+      );
     }
     const { foreignTableId, fkHostTableName, selfKeyName, foreignKeyName, relationship } =
       field.options;
     if (foreignTableId !== tableId) {
-      throw new BadRequestException('Field is not linked to current table');
+      throw new CustomHttpException(
+        'Field is not linked to current table',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.field.notLinkedToCurrentTable',
+          },
+        }
+      );
     }
     if (relationship === Relationship.OneMany) {
       if (this.isJunctionTable(fkHostTableName)) {
         queryBuilder.whereNotIn('__id', function () {
           this.select(foreignKeyName).from(fkHostTableName);
+          if (recordId) {
+            this.whereNot(selfKeyName, recordId);
+          }
         });
       } else {
-        queryBuilder.where(selfKeyName, null);
+        queryBuilder.where(function () {
+          this.whereNull(selfKeyName);
+          if (recordId) {
+            this.orWhere(selfKeyName, recordId);
+          }
+        });
       }
     }
     if (relationship === Relationship.OneOne) {
       if (selfKeyName === '__id') {
         queryBuilder.whereNotIn('__id', function () {
           this.select(foreignKeyName).from(fkHostTableName).whereNotNull(foreignKeyName);
+          if (recordId) {
+            this.whereNot(selfKeyName, recordId);
+          }
         });
       } else {
-        queryBuilder.where(selfKeyName, null);
-      }
-    }
-
-    if (recordId) {
-      const linkIds = await this.getLinkCellIds(fieldRaw.tableId, field, recordId);
-      if (linkIds.length) {
-        queryBuilder.whereNotIn('__id', linkIds);
+        queryBuilder.where(function () {
+          this.whereNull(selfKeyName);
+          if (recordId) {
+            this.orWhere(selfKeyName, recordId);
+          }
+        });
       }
     }
   }
@@ -365,13 +680,19 @@ export class RecordService {
     filter?: IFilter,
     orderBy?: ISortItem[],
     groupBy?: IGroup,
-    search?: string[]
+    search?: [string, string?, boolean?],
+    projection?: string[]
   ) {
     if (filter || orderBy?.length || groupBy?.length || search) {
-      // The field Meta is needed to construct the filter if it exists
-      const fields = await this.getFieldsByProjection(tableId);
+      // Always load full field metadata so filters can reference denied fields for read,
+      // while projection limits applied later keep them hidden from results.
+      const fields = await this.getFieldsByProjection(tableId, undefined);
+      const allowedSet = projection?.length ? new Set(projection) : undefined;
       return fields.reduce(
         (map, field) => {
+          if (allowedSet && !allowedSet.has(field.id)) {
+            return map;
+          }
           map[field.id] = field;
           map[field.name] = field;
           return map;
@@ -379,6 +700,110 @@ export class RecordService {
         {} as Record<string, IFieldInstance>
       );
     }
+  }
+
+  private resolveAggregateProjection(params: {
+    groupBy?: IGroup;
+    filter?: IFilter;
+    searchFields?: IFieldInstance[];
+    allowedFieldIds?: string[];
+  }): string[] | undefined {
+    const { groupBy, filter, searchFields, allowedFieldIds } = params;
+    const projectionSet = new Set<string>();
+
+    groupBy?.forEach(({ fieldId }) => {
+      if (fieldId) {
+        projectionSet.add(fieldId);
+      }
+    });
+
+    if (filter) {
+      for (const fieldId of extractFieldIdsFromFilter(filter)) {
+        projectionSet.add(fieldId);
+      }
+    }
+
+    searchFields?.forEach((fieldInstance) => {
+      projectionSet.add(fieldInstance.id);
+    });
+
+    if (projectionSet.size === 0) {
+      return undefined;
+    }
+
+    const projectionArray = Array.from(projectionSet);
+    if (!allowedFieldIds?.length) {
+      return projectionArray;
+    }
+
+    const allowedSet = new Set(allowedFieldIds);
+    const filtered = projectionArray.filter((fieldId) => allowedSet.has(fieldId));
+    return filtered.length ? filtered : undefined;
+  }
+
+  private async sanitizeFilterByEnabledFields(
+    tableId: string,
+    filter: IFilter | undefined,
+    enabledFieldIds?: string[]
+  ): Promise<IFilter | undefined> {
+    if (!filter || !enabledFieldIds?.length) {
+      return filter;
+    }
+    const fields = await this.dataLoaderService.field.load(tableId);
+    const keyToId = new Map<string, string>();
+    for (const field of fields) {
+      keyToId.set(field.id, field.id);
+      keyToId.set(field.name, field.id);
+      keyToId.set(field.dbFieldName, field.id);
+    }
+    const allowed = new Set(enabledFieldIds);
+
+    const sanitize = (target: IFilter): IFilter | null => {
+      if (!target) {
+        return null;
+      }
+
+      const isFilterGroup = (value: unknown): value is IFilter =>
+        !!value && typeof value === 'object' && 'filterSet' in value;
+
+      const isFilterLeaf = (value: unknown): value is IFilterItem =>
+        !!value && typeof value === 'object' && 'fieldId' in value;
+
+      const sanitizedSet: NonNullable<IFilter>['filterSet'] = [];
+      for (const item of target.filterSet) {
+        if (isFilterGroup(item)) {
+          const nested = sanitize(item);
+          if (nested) {
+            sanitizedSet.push(nested);
+          }
+          continue;
+        }
+
+        if (!isFilterLeaf(item)) {
+          continue;
+        }
+
+        const candidateId = keyToId.get(item.fieldId) ?? item.fieldId;
+        if (!allowed.has(candidateId)) {
+          continue;
+        }
+        sanitizedSet.push({
+          ...item,
+          fieldId: candidateId,
+        });
+      }
+
+      if (sanitizedSet.length === 0) {
+        return null;
+      }
+      return {
+        ...target,
+        filterSet: sanitizedSet,
+      };
+    };
+
+    const sanitized = sanitize(filter);
+    return sanitized ?? undefined;
   }
 
   private async getTinyView(tableId: string, viewId?: string) {
@@ -389,45 +814,129 @@ export class RecordService {
     return this.prismaService
       .txClient()
       .view.findFirstOrThrow({
-        select: { id: true, type: true, filter: true, sort: true, group: true },
+        select: { id: true, type: true, filter: true, sort: true, group: true, columnMeta: true },
         where: { tableId, id: viewId, deletedTime: null },
       })
       .catch(() => {
-        throw new NotFoundException(`View ${viewId} not found`);
+        throw new CustomHttpException(`View ${viewId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.view.notFound',
+          },
+        });
       });
   }
 
-  private parseSearch(search: string[], fieldMap?: Record<string, IFieldInstance>) {
-    const [searchValue, fieldIdOrName] = search;
+  public parseSearch(
+    search: [string, string?, boolean?],
+    fieldMap?: Record<string, IFieldInstance>
+  ): [string, string?, boolean?] {
+    const [searchValue, fieldId, hideNotMatchRow] = search;
+
     if (!fieldMap) {
-      throw new Error('fieldMap is required when search is set');
+      throw new CustomHttpException(
+        'fieldMap is required when search is set',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.aggregation.fieldMapRequired',
+          },
+        }
+      );
     }
-    const field = fieldMap[fieldIdOrName];
-    if (!field) {
-      throw new NotFoundException(`Field ${fieldIdOrName} not found`);
+
+    if (!fieldId) {
+      return [searchValue, fieldId, hideNotMatchRow];
     }
-    return [searchValue, field.id];
+
+    const fieldIds = fieldId?.split(',');
+
+    fieldIds.forEach((id) => {
+      const field = fieldMap[id];
+      if (!field) {
+        throw new CustomHttpException(`Field ${fieldId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.field.notFound',
+          },
+        });
+      }
+    });
+
+    return [searchValue, fieldId, hideNotMatchRow];
+  }
+
+  private stringifyRawQueryDebugPayload(payload: unknown): string {
+    try {
+      return JSON.stringify(payload, (_, value) =>
+        typeof value === 'bigint' ? value.toString() : value
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Failed to stringify raw query debug payload: ${reason}`);
+      return '[raw query debug payload: <unserializable>]';
+    }
+  }
+
+  private handleRawQueryError(
+    error: unknown,
+    sql: string,
+    debugContext: Record<string, unknown>
+  ): never {
+    const context = { sql, ...debugContext };
+    const contextString = this.stringifyRawQueryDebugPayload(context);
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      error.message = `${error.message}\nContext: ${contextString}`;
+      Object.assign(error, context);
+      this.logger.error(
+        `Raw query known request error. Context: ${contextString}`,
+        error.stack ?? undefined
+      );
+      throw error;
+    }
+    this.logger.error(
+      `Raw query unexpected error. message: ${(error as Error)?.message}. Context: ${contextString}`,
+      (error as Error)?.stack
+    );
+    if (error instanceof Error) {
+      error.message = `${error.message}\nContext: ${contextString}`;
+      Object.assign(error, context);
+    }
+    throw error;
   }
 
   async prepareQuery(
     tableId: string,
-    query: Pick<IGetRecordsRo, 'viewId' | 'orderBy' | 'groupBy' | 'filter' | 'search'>
+    query: Pick<
+      IGetRecordsRo,
+      | 'viewId'
+      | 'orderBy'
+      | 'groupBy'
+      | 'filter'
+      | 'search'
+      | 'filterLinkCellSelected'
+      | 'ignoreViewQuery'
+    >
   ) {
+    const viewId = query.ignoreViewQuery ? undefined : query.viewId;
     const {
-      viewId,
       orderBy: extraOrderBy,
       groupBy: extraGroupBy,
       filter: extraFilter,
       search: originSearch,
     } = query;
-
     const dbTableName = await this.getDbTableName(tableId);
-
-    const queryBuilder = this.knex(dbTableName);
+    const { viewCte, builder, enabledFieldIds } = await this.recordPermissionService.wrapView(
+      tableId,
+      this.knex.queryBuilder(),
+      {
+        viewId: query.viewId,
+        keepPrimaryKey: Boolean(query.filterLinkCellSelected),
+      }
+    );
 
     const view = await this.getTinyView(tableId, viewId);
 
-    const filter = mergeWithDefaultFilter(view?.filter, extraFilter);
+    const mergedFilter = mergeWithDefaultFilter(view?.filter, extraFilter);
+    const filter = await this.sanitizeFilterByEnabledFields(tableId, mergedFilter, enabledFieldIds);
     const orderBy = mergeWithDefaultSort(view?.sort, extraOrderBy);
     const groupBy = parseGroup(extraGroupBy);
     const fieldMap = await this.getNecessaryFieldMap(
@@ -435,27 +944,34 @@ export class RecordService {
       filter,
       orderBy,
       groupBy,
-      originSearch
+      originSearch,
+      enabledFieldIds
     );
+
     const search = originSearch ? this.parseSearch(originSearch, fieldMap) : undefined;
 
     return {
-      queryBuilder,
+      permissionBuilder: builder,
       dbTableName,
+      viewCte,
       filter,
       search,
       orderBy,
       groupBy,
       fieldMap,
+      enabledFieldIds,
     };
   }
 
-  async getBasicOrderIndexField(dbTableName: string, viewId: string | undefined) {
+  async getBasicOrderIndexField(tableId: string, dbTableName: string, viewId: string | undefined) {
+    if (!viewId) {
+      return '__auto_number';
+    }
     const columnName = `${ROW_ORDER_FIELD_PREFIX}_${viewId}`;
     const exists = await this.dbProvider.checkColumnExist(
       dbTableName,
       columnName,
-      this.prismaService.txClient()
+      await this.databaseRouter.dataPrismaExecutorForTable(tableId)
     );
 
     if (exists) {
@@ -473,86 +989,140 @@ export class RecordService {
    *
    * @param {string} tableId - The unique identifier of the table to determine the target of the query.
    * @param {Pick<IGetRecordsRo, 'viewId' | 'orderBy' | 'filter' | 'filterLinkCellCandidate'>} query - An object of query parameters, including view ID, sorting rules, filtering conditions, etc.
-   * @returns {Promise<Knex.QueryBuilder>} Returns an instance of the Knex query builder encapsulating the constructed SQL query.
    */
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   async buildFilterSortQuery(
     tableId: string,
     query: Pick<
       IGetRecordsRo,
       | 'viewId'
+      | 'ignoreViewQuery'
       | 'orderBy'
       | 'groupBy'
       | 'filter'
       | 'search'
+      | 'projection'
       | 'filterLinkCellCandidate'
       | 'filterLinkCellSelected'
       | 'collapsedGroupIds'
       | 'selectedRecordIds'
-    >
-  ): Promise<Knex.QueryBuilder> {
+      | 'skip'
+      | 'take'
+    >,
+    useQueryModel = false
+  ) {
     // Prepare the base query builder, filtering conditions, sorting rules, grouping rules and field mapping
-    const { dbTableName, queryBuilder, filter, search, orderBy, groupBy, fieldMap } =
-      await this.prepareQuery(tableId, query);
+    const {
+      permissionBuilder,
+      dbTableName,
+      viewCte,
+      filter,
+      search,
+      orderBy,
+      groupBy,
+      fieldMap,
+      enabledFieldIds,
+    } = await this.prepareQuery(tableId, query);
+
+    const basicSortIndex = await this.getBasicOrderIndexField(tableId, dbTableName, query.viewId);
+
+    const restrictRecordIds =
+      query.selectedRecordIds && !query.filterLinkCellCandidate
+        ? query.selectedRecordIds
+        : undefined;
 
     // Retrieve the current user's ID to build user-related query conditions
     const currentUserId = this.cls.get('user.id');
+    const projectionIds = fieldMap
+      ? Array.from(new Set(Object.values(fieldMap).map((f) => f.id))).filter(
+          (id) => !enabledFieldIds || enabledFieldIds.includes(id)
+        )
+      : [];
+
+    const { qb, alias, selectionMap } = await this.recordQueryBuilder.createRecordQueryBuilder(
+      viewCte ?? dbTableName,
+      {
+        tableId,
+        viewId: query.viewId,
+        filter,
+        currentUserId,
+        sort: [...(groupBy ?? []), ...(orderBy ?? [])],
+        // Only select fields required by filter/order/search to avoid touching unrelated columns
+        projection: projectionIds,
+        useQueryModel,
+        limit: query.take,
+        offset: query.skip,
+        hasSearch: Boolean(search?.[2]),
+        defaultOrderField: basicSortIndex,
+        restrictRecordIds,
+        builder: permissionBuilder,
+      }
+    );
 
     if (query.filterLinkCellSelected && query.filterLinkCellCandidate) {
-      throw new BadRequestException(
-        'filterLinkCellSelected and filterLinkCellCandidate can not be set at the same time'
+      throw new CustomHttpException(
+        'filterLinkCellSelected and filterLinkCellCandidate can not be set at the same time',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.aggregation.filterLinkCellQueryConflict',
+          },
+        }
       );
     }
 
     if (query.selectedRecordIds) {
       query.filterLinkCellCandidate
-        ? queryBuilder.whereNotIn(`${dbTableName}.__id`, query.selectedRecordIds)
-        : queryBuilder.whereIn(`${dbTableName}.__id`, query.selectedRecordIds);
+        ? qb.whereNotIn(`${alias}.__id`, query.selectedRecordIds)
+        : qb.whereIn(`${alias}.__id`, query.selectedRecordIds);
     }
 
     if (query.filterLinkCellCandidate) {
-      await this.buildLinkCandidateQuery(
-        queryBuilder,
-        tableId,
-        dbTableName,
-        query.filterLinkCellCandidate
-      );
+      await this.buildLinkCandidateQuery(qb, tableId, query.filterLinkCellCandidate);
     }
 
     if (query.filterLinkCellSelected) {
       await this.buildLinkSelectedQuery(
-        queryBuilder,
+        qb,
         tableId,
         dbTableName,
+        alias,
         query.filterLinkCellSelected
       );
     }
 
-    // Add filtering conditions to the query builder
-    this.dbProvider
-      .filterQuery(queryBuilder, fieldMap, filter, { withUserId: currentUserId })
-      .appendQueryBuilder();
-
-    // Add sorting rules to the query builder
-    this.dbProvider
-      .sortQuery(queryBuilder, fieldMap, [...(groupBy ?? []), ...orderBy])
-      .appendSortBuilder();
-
-    // add search rules to the query builder
-    this.dbProvider.searchQuery(queryBuilder, fieldMap, search);
+    if (search && search[2] && fieldMap) {
+      // query.projection narrows search to the fields the caller displays
+      // (e.g. personal view visible columns); intersect it with the permission
+      // whitelist so it can only ever shrink the searchable set
+      const searchProjection = query.projection?.length
+        ? enabledFieldIds
+          ? query.projection.filter((fieldId) => enabledFieldIds.includes(fieldId))
+          : query.projection
+        : enabledFieldIds;
+      const searchFields = await this.getSearchFields(
+        fieldMap,
+        search,
+        query?.viewId,
+        searchProjection
+      );
+      const tableIndex = await this.tableIndexService.getActivatedTableIndexes(tableId);
+      qb.where((builder) => {
+        this.dbProvider.searchQuery(builder, searchFields, tableIndex, search, { selectionMap });
+      });
+    }
 
     // ignore sorting when filterLinkCellSelected is set
     if (query.filterLinkCellSelected && Array.isArray(query.filterLinkCellSelected)) {
-      await this.buildLinkSelectedSort(queryBuilder, dbTableName, query.filterLinkCellSelected);
+      await this.buildLinkSelectedSort(qb, alias, query.filterLinkCellSelected);
     } else {
-      const basicSortIndex = await this.getBasicOrderIndexField(dbTableName, query.viewId);
       // view sorting added by default
-      queryBuilder.orderBy(`${dbTableName}.${basicSortIndex}`, 'asc');
+      qb.orderBy(`${alias}.${basicSortIndex}`, 'asc');
     }
 
-    this.logger.debug('buildFilterSortQuery: %s', queryBuilder.toQuery());
     // If you return `queryBuilder` directly and use `await` to receive it,
     // it will perform a query DB operation, which we obviously don't want to see here
-    return { queryBuilder, dbTableName };
+    return { queryBuilder: qb, dbTableName, viewCte, alias };
   }
 
   convertProjection(fieldKeys?: string[]) {
@@ -562,16 +1132,49 @@ export class RecordService {
     }, {});
   }
 
-  async getRecordsById(tableId: string, recordIds: string[]): Promise<IRecordsVo> {
-    const recordSnapshot = await this.getSnapshotBulk(
-      tableId,
-      recordIds,
-      undefined,
-      FieldKeyType.Id
-    );
+  private async convertEnabledFieldIdsToProjection(
+    tableId: string,
+    enabledFieldIds?: string[],
+    fieldKeyType: FieldKeyType = FieldKeyType.Id
+  ) {
+    if (!enabledFieldIds?.length) {
+      return undefined;
+    }
+
+    if (fieldKeyType === FieldKeyType.Id) {
+      return this.convertProjection(enabledFieldIds);
+    }
+
+    const fields = await this.dataLoaderService.field.load(tableId, {
+      id: enabledFieldIds,
+    });
+    if (!fields.length) {
+      return undefined;
+    }
+
+    const fieldKeys = fields
+      .map((field) => field[fieldKeyType] as string | undefined)
+      .filter((key): key is string => Boolean(key));
+
+    return fieldKeys.length ? this.convertProjection(fieldKeys) : undefined;
+  }
+
+  async getRecordsById(
+    tableId: string,
+    recordIds: string[],
+    withPermission = true,
+    useQueryModel = true
+  ): Promise<IRecordsVo> {
+    const recordSnapshot = await this[
+      withPermission ? 'getSnapshotBulkWithPermission' : 'getSnapshotBulk'
+    ](tableId, recordIds, undefined, FieldKeyType.Id, undefined, useQueryModel);
 
     if (!recordSnapshot.length) {
-      throw new NotFoundException('Can not get records');
+      throw new CustomHttpException('Can not get record', HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.record.notFound',
+        },
+      });
     }
 
     return {
@@ -595,6 +1198,7 @@ export class RecordService {
     });
 
     const columnMeta = JSON.parse(view.columnMeta) as IColumnMeta;
+
     const useVisible = Object.values(columnMeta).some((column) => 'visible' in column);
     const useHidden = Object.values(columnMeta).some((column) => 'hidden' in column);
 
@@ -602,19 +1206,16 @@ export class RecordService {
       return;
     }
 
-    const fieldIdOrNames = await this.prismaService.txClient().field.findMany({
-      where: { tableId, deletedTime: null },
-      select: { id: true, name: true },
-    });
+    const fieldRaws = await this.dataLoaderService.field.load(tableId);
 
-    const fieldMap = keyBy(fieldIdOrNames, 'id');
+    const fieldMap = keyBy(fieldRaws, 'id');
 
     const projection = Object.entries(columnMeta).reduce<Record<string, boolean>>(
       (acc, [fieldId, column]) => {
         const field = fieldMap[fieldId];
         if (!field) return acc;
 
-        const fieldKey = fieldKeyType === FieldKeyType.Id ? field.id : field.name;
+        const fieldKey = field[fieldKeyType];
 
         if (useVisible) {
           if ('visible' in column && column.visible) {
@@ -636,30 +1237,40 @@ export class RecordService {
     return Object.keys(projection).length > 0 ? projection : undefined;
   }
 
-  async getRecords(tableId: string, query: IGetRecordsRo): Promise<IRecordsVo> {
-    const queryResult = await this.getDocIdsByQuery(tableId, {
-      viewId: query.viewId,
-      skip: query.skip,
-      take: query.take,
-      filter: query.filter,
-      orderBy: query.orderBy,
-      search: query.search,
-      groupBy: query.groupBy,
-      filterLinkCellCandidate: query.filterLinkCellCandidate,
-      filterLinkCellSelected: query.filterLinkCellSelected,
-      selectedRecordIds: query.selectedRecordIds,
-    });
+  async getRecords(
+    tableId: string,
+    query: IGetRecordsRo,
+    useQueryModel = false
+  ): Promise<IRecordsVo> {
+    const queryResult = await this.getDocIdsByQuery(
+      tableId,
+      {
+        ignoreViewQuery: query.ignoreViewQuery ?? false,
+        viewId: query.viewId,
+        skip: query.skip,
+        take: query.take,
+        filter: query.filter,
+        orderBy: query.orderBy,
+        search: query.search,
+        groupBy: query.groupBy,
+        filterLinkCellCandidate: query.filterLinkCellCandidate,
+        filterLinkCellSelected: query.filterLinkCellSelected,
+        selectedRecordIds: query.selectedRecordIds,
+      },
+      useQueryModel
+    );
 
     const projection = query.projection
       ? this.convertProjection(query.projection)
       : await this.getViewProjection(tableId, query);
 
-    const recordSnapshot = await this.getSnapshotBulk(
+    const recordSnapshot = await this.getSnapshotBulkWithPermission(
       tableId,
       queryResult.ids,
       projection,
       query.fieldKeyType || FieldKeyType.Name,
-      query.cellFormat
+      query.cellFormat,
+      useQueryModel
     );
 
     return {
@@ -668,18 +1279,31 @@ export class RecordService {
     };
   }
 
-  async getRecord(tableId: string, recordId: string, query: IGetRecordQuery): Promise<IRecord> {
+  async getRecord(
+    tableId: string,
+    recordId: string,
+    query: IGetRecordQuery,
+    withPermission = true,
+    useQueryModel = false
+  ): Promise<IRecord> {
     const { projection, fieldKeyType = FieldKeyType.Name, cellFormat } = query;
-    const recordSnapshot = await this.getSnapshotBulk(
+    const recordSnapshot = await this[
+      withPermission ? 'getSnapshotBulkWithPermission' : 'getSnapshotBulk'
+    ](
       tableId,
       [recordId],
       this.convertProjection(projection),
       fieldKeyType,
-      cellFormat
+      cellFormat,
+      useQueryModel
     );
 
     if (!recordSnapshot.length) {
-      throw new NotFoundException('Can not get record');
+      throw new CustomHttpException('Can not get record', HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.record.notFound',
+        },
+      });
     }
 
     return recordSnapshot[0].data;
@@ -693,12 +1317,14 @@ export class RecordService {
     return record.fields[fieldId];
   }
 
-  async getMaxRecordOrder(dbTableName: string) {
+  async getMaxRecordOrder(tableId: string, dbTableName: string) {
     const sqlNative = this.knex(dbTableName).max('__auto_number', { as: 'max' }).toSQL().toNative();
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ max?: number }[]>(sqlNative.sql, ...sqlNative.bindings);
+    const result = await this.databaseRouter.queryDataPrismaForTable<{ max?: number }[]>(
+      tableId,
+      sqlNative.sql,
+      ...sqlNative.bindings
+    );
 
     return Number(result[0]?.max ?? 0) + 1;
   }
@@ -710,12 +1336,23 @@ export class RecordService {
       .select('__id as id', '__version as version')
       .whereIn('__id', recordIds)
       .toQuery();
-    const recordRaw = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ id: string; version: number }[]>(nativeQuery);
+    const recordRaw = await this.databaseRouter.queryDataPrismaForTable<
+      { id: string; version: number }[]
+    >(tableId, nativeQuery);
 
     if (recordIds.length !== recordRaw.length) {
-      throw new BadRequestException('delete record not found');
+      throw new CustomHttpException(
+        `Some records to be deleted cannot be found, ids: ${difference(
+          recordIds,
+          recordRaw.map((r) => r.id)
+        ).join(',')}`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.record.deletedIdsNotFound',
+          },
+        }
+      );
     }
 
     const recordRawMap = keyBy(recordRaw, 'id');
@@ -730,23 +1367,25 @@ export class RecordService {
     await this.batchDel(tableId, recordIds);
   }
 
-  private async getViewIndexColumns(dbTableName: string) {
+  private async getViewIndexColumns(tableId: string, dbTableName: string) {
     const columnInfoQuery = this.dbProvider.columnInfo(dbTableName);
-    const columns = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ name: string }[]>(columnInfoQuery);
+    const columns = await this.databaseRouter.queryDataPrismaForTable<{ name: string }[]>(
+      tableId,
+      columnInfoQuery
+    );
     return columns
       .filter((column) => column.name.startsWith(ROW_ORDER_FIELD_PREFIX))
       .map((column) => column.name);
   }
 
+  @Timing()
   async getRecordIndexes(
-    tableId: string,
+    table: TableDomain,
     recordIds: string[],
     viewId?: string
   ): Promise<Record<string, number>[] | undefined> {
-    const dbTableName = await this.getDbTableName(tableId);
-    const allViewIndexColumns = await this.getViewIndexColumns(dbTableName);
+    const dbTableName = table.dbTableName;
+    const allViewIndexColumns = await this.getViewIndexColumns(table.id, dbTableName);
     const viewIndexColumns = viewId
       ? (() => {
           const viewIndexColumns = allViewIndexColumns.filter((column) => column.endsWith(viewId));
@@ -774,9 +1413,10 @@ export class RecordService {
       .select('__id')
       .whereIn('__id', recordIds)
       .toQuery();
-    const indexValues = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<Record<string, number>[]>(indexQuery);
+    const indexValues = await this.databaseRouter.queryDataPrismaForTable<Record<string, number>[]>(
+      table.id,
+      indexQuery
+    );
 
     const indexMap = indexValues.reduce<Record<string, Record<string, number>>>((map, cur) => {
       const id = cur.__id;
@@ -796,7 +1436,7 @@ export class RecordService {
     }[]
   ) {
     const dbTableName = await this.getDbTableName(tableId);
-    const viewIndexColumns = await this.getViewIndexColumns(dbTableName);
+    const viewIndexColumns = await this.getViewIndexColumns(tableId, dbTableName);
     if (!viewIndexColumns.length) {
       return;
     }
@@ -822,61 +1462,105 @@ export class RecordService {
       .filter(Boolean) as string[];
 
     for (const sql of updateRecordSqls) {
-      await this.prismaService.txClient().$executeRawUnsafe(sql);
+      await this.databaseRouter.executeDataPrismaForTable(tableId, sql);
     }
   }
 
   @Timing()
   async batchCreateRecords(
-    tableId: string,
+    table: TableDomain,
     records: IRecordInnerRo[],
     fieldKeyType: FieldKeyType,
-    fieldRaws: IFieldRaws
+    fields: readonly FieldCore[]
   ) {
-    const snapshots = await this.createBatch(tableId, records, fieldKeyType, fieldRaws);
+    const snapshots = await this.createBatch(table, records, fieldKeyType, fields);
 
     const dataList = snapshots.map((snapshot) => ({
       docId: snapshot.__id,
       version: snapshot.__version == null ? 0 : snapshot.__version - 1,
     }));
 
-    await this.batchService.saveRawOps(tableId, RawOpType.Create, IdPrefix.Record, dataList);
+    this.batchService.saveRawOps(table.id, RawOpType.Create, IdPrefix.Record, dataList);
   }
 
   @Timing()
   async createRecordsOnlySql(
-    tableId: string,
+    table: TableDomain,
     records: {
       fields: Record<string, unknown>;
-    }[]
+    }[],
+    fieldKeyType: FieldKeyType = FieldKeyType.Id
   ) {
-    const userId = this.cls.get('user.id');
-    await this.creditCheck(tableId);
-    const dbTableName = await this.getDbTableName(tableId);
-    const fields = await this.getFieldsByProjection(tableId);
+    const user = this.cls.get('user');
+    const userId = user.id;
+    await this.creditCheck(table.id);
+    const dbTableName = table.dbTableName;
+    const fields = await this.getFieldsByProjection(table.id);
+    const writableCreatedTimeFieldNames = await this.getWritableCreatedTimeFieldNames(
+      table.id,
+      dbTableName,
+      fields
+    );
+    const writableCreatedByFieldNames = await this.getWritableCreatedByFieldNames(
+      table.id,
+      dbTableName,
+      fields
+    );
+    const auditUserValue =
+      user &&
+      UserFieldDto.fullAvatarUrl({
+        id: user.id,
+        title: user.name,
+        email: user.email,
+      });
+    const createdByFields = fields.filter(
+      (f) =>
+        f.type === FieldType.CreatedBy &&
+        f.shouldPersistAuditValue?.() &&
+        writableCreatedByFieldNames.has(f.dbFieldName)
+    ) as IFieldInstance[];
     const fieldInstanceMap = fields.reduce(
       (map, curField) => {
-        map[curField.id] = curField;
+        map[curField[fieldKeyType]] = curField;
         return map;
       },
       {} as Record<string, IFieldInstance>
     );
 
+    // Imported records intentionally write no record history: creation is already
+    // attributed by __created_by/__created_time, and per-cell null→value entries
+    // would add rows × non-empty-cells of history on large imports.
     const newRecords = records.map((record) => {
+      const createdTime =
+        writableCreatedTimeFieldNames.size > 0 ? new Date().toISOString() : undefined;
       const fieldsValues: Record<string, unknown> = {};
+      const recordId = generateRecordId();
       Object.entries(record.fields).forEach(([fieldId, value]) => {
         const fieldInstance = fieldInstanceMap[fieldId];
         fieldsValues[fieldInstance.dbFieldName] = fieldInstance.convertCellValue2DBValue(value);
       });
-      return {
-        __id: generateRecordId(),
+      if (auditUserValue && createdByFields.length) {
+        createdByFields.forEach((field) => {
+          fieldsValues[field.dbFieldName] = field.convertCellValue2DBValue({
+            ...auditUserValue,
+          });
+        });
+      }
+      writableCreatedTimeFieldNames.forEach((dbFieldName) => {
+        if (createdTime != null) {
+          fieldsValues[dbFieldName] = createdTime;
+        }
+      });
+      return removeUndefined({
+        __id: recordId,
         __created_by: userId,
+        __created_time: createdTime,
         __version: 1,
         ...fieldsValues,
-      };
+      });
     });
     const sql = this.dbProvider.batchInsertSql(dbTableName, newRecords);
-    await this.prismaService.txClient().$executeRawUnsafe(sql);
+    await this.databaseRouter.executeDataPrismaForTable(table.id, sql);
   }
 
   async creditCheck(tableId: string) {
@@ -889,7 +1573,7 @@ export class RecordService {
       select: { dbTableName: true, base: { select: { space: { select: { credit: true } } } } },
     });
 
-    const rowCount = await this.getAllRecordCount(table.dbTableName);
+    const rowCount = await this.getAllRecordCount(table.dbTableName, tableId);
 
     const maxRowCount =
       table.base.space.credit == null
@@ -898,15 +1582,27 @@ export class RecordService {
 
     if (rowCount >= maxRowCount) {
       this.logger.log(`Exceed row count: ${maxRowCount}`, 'creditCheck');
-      throw new BadRequestException(
-        `Exceed max row limit: ${maxRowCount}, please contact us to increase the limit`
+      throw new CustomHttpException(
+        `Exceed max row limit: ${maxRowCount}, please contact us to increase the limit`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.billing.exceedMaxRowLimit',
+            context: {
+              maxRowCount,
+            },
+          },
+        }
       );
     }
   }
 
-  private async getAllViewIndexesField(dbTableName: string) {
+  private async getAllViewIndexesField(tableId: string, dbTableName: string) {
     const query = this.dbProvider.columnInfo(dbTableName);
-    const columns = await this.prismaService.txClient().$queryRawUnsafe<{ name: string }[]>(query);
+    const columns = await this.databaseRouter.queryDataPrismaForTable<{ name: string }[]>(
+      tableId,
+      query
+    );
     return columns
       .filter((column) => column.name.startsWith(ROW_ORDER_FIELD_PREFIX))
       .map((column) => column.name)
@@ -917,26 +1613,89 @@ export class RecordService {
       }, {});
   }
 
+  private hasPersistedLinkColumn(field: FieldCore) {
+    if (field.type !== FieldType.Link) {
+      return true;
+    }
+
+    const options = field.options as ILinkFieldOptions | undefined;
+    if (!options) {
+      return true;
+    }
+
+    const inferredForeignKeyName =
+      options.foreignKeyName ??
+      (options.relationship === Relationship.ManyOne || options.relationship === Relationship.OneOne
+        ? field.dbFieldName
+        : undefined);
+    const inferredSelfKeyName =
+      options.selfKeyName ??
+      (options.relationship === Relationship.OneMany && options.isOneWay === false
+        ? field.dbFieldName
+        : undefined);
+
+    return (
+      field.dbFieldName !== inferredForeignKeyName && field.dbFieldName !== inferredSelfKeyName
+    );
+  }
+
   private async createBatch(
-    tableId: string,
+    table: TableDomain,
     records: IRecordInnerRo[],
     fieldKeyType: FieldKeyType,
-    fieldRaws: IFieldRaws
+    fields: readonly FieldCore[]
   ) {
     const userId = this.cls.get('user.id');
-    await this.creditCheck(tableId);
-    const dbTableName = await this.getDbTableName(tableId);
+    await this.creditCheck(table.id);
 
-    const maxRecordOrder = await this.getMaxRecordOrder(dbTableName);
+    const { dbTableName, name: tableName } = table;
+    const maxRecordOrder = await this.getMaxRecordOrder(table.id, dbTableName);
+    const writableCreatedTimeFieldNames = await this.getWritableCreatedTimeFieldNames(
+      table.id,
+      dbTableName,
+      fields
+    );
+    const writableCreatedByFieldNames = await this.getWritableCreatedByFieldNames(
+      table.id,
+      dbTableName,
+      fields
+    );
 
     const views = await this.prismaService.txClient().view.findMany({
-      where: { tableId, deletedTime: null },
+      where: { tableId: table.id, deletedTime: null },
       select: { id: true },
     });
 
-    const allViewIndexes = await this.getAllViewIndexesField(dbTableName);
+    const allViewIndexes = await this.getAllViewIndexesField(table.id, dbTableName);
 
-    const validationFields = fieldRaws.filter((field) => field.notNull || field.unique);
+    const validationFields = fields
+      .filter((f) => !f.isComputed)
+      .filter((field) => field.notNull || field.unique)
+      .filter((field) => this.hasPersistedLinkColumn(field));
+
+    const user = this.cls.get('user');
+    const auditUserValue =
+      user &&
+      UserFieldDto.fullAvatarUrl({
+        id: user.id,
+        title: user.name,
+        email: user.email,
+      });
+    const createdByFields = fields.filter(
+      (f) =>
+        f.type === FieldType.CreatedBy &&
+        (f as CreatedByFieldCore).shouldPersistAuditValue?.() &&
+        writableCreatedByFieldNames.has(f.dbFieldName)
+    );
+    const cloneAuditUserValue = () => (auditUserValue ? { ...auditUserValue } : null);
+    const sanitizeAuditUserValue = () => {
+      const cloned = cloneAuditUserValue();
+      if (cloned && typeof cloned === 'object' && 'avatarUrl' in cloned) {
+        // Avatar URLs are derived; strip before persistence to keep storage lean
+        delete (cloned as { avatarUrl?: string }).avatarUrl;
+      }
+      return cloned;
+    };
 
     const snapshots = records
       .map((record, i) =>
@@ -957,6 +1716,9 @@ export class RecordService {
       .map((order, i) => {
         const snapshot = records[i];
         const fields = snapshot.fields;
+        const createdTime =
+          snapshot.createdTime ??
+          (writableCreatedTimeFieldNames.size > 0 ? new Date().toISOString() : undefined);
 
         const dbFieldValueMap = validationFields.reduce(
           (map, field) => {
@@ -969,23 +1731,96 @@ export class RecordService {
           },
           {} as Record<string, unknown>
         );
+        const auditFieldValues: Record<string, unknown> = {};
+
+        if (auditUserValue && createdByFields.length) {
+          createdByFields.forEach((field) => {
+            auditFieldValues[field.dbFieldName] = sanitizeAuditUserValue();
+          });
+        }
+
+        const createdTimeFieldValues = Array.from(writableCreatedTimeFieldNames).reduce(
+          (map, dbFieldName) => {
+            if (createdTime != null) {
+              map[dbFieldName] = createdTime;
+            }
+            return map;
+          },
+          {} as Record<string, unknown>
+        );
 
         return removeUndefined({
           __id: snapshot.id,
           __created_by: snapshot.createdBy || userId,
           __last_modified_by: snapshot.lastModifiedBy || undefined,
-          __created_time: snapshot.createdTime || undefined,
+          __created_time: createdTime,
           __last_modified_time: snapshot.lastModifiedTime || undefined,
           __auto_number: snapshot.autoNumber == null ? undefined : snapshot.autoNumber,
           __version: 1,
           ...order,
           ...dbFieldValueMap,
+          ...auditFieldValues,
+          ...createdTimeFieldValues,
         });
       });
 
-    const sql = this.dbProvider.batchInsertSql(dbTableName, snapshots);
+    const sql = this.dbProvider.batchInsertSql(
+      dbTableName,
+      snapshots.map((s) => {
+        return Object.entries(s).reduce(
+          (acc, [key, value]) => {
+            if (Array.isArray(value)) {
+              acc[key] = JSON.stringify(value);
+              return acc;
+            }
+            if (value && typeof value === 'object') {
+              const isDate = (value as Date) instanceof Date;
+              if (!isDate) {
+                acc[key] = JSON.stringify(value);
+                return acc;
+              }
+            }
+            acc[key] = value;
+            return acc;
+          },
+          {} as Record<string, unknown>
+        );
+      })
+    );
 
-    await this.prismaService.txClient().$executeRawUnsafe(sql);
+    await handleDBValidationErrors({
+      fn: () => this.databaseRouter.executeDataPrismaForTable(table.id, sql),
+      handleUniqueError: () => {
+        throw new CustomHttpException(
+          `Fields ${validationFields.map((f) => f.id).join(', ')} unique validation failed`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.custom.fieldValueDuplicate',
+              context: {
+                tableName,
+                fieldName: validationFields.map((f) => f.name).join(', '),
+              },
+            },
+          }
+        );
+      },
+      handleNotNullError: () => {
+        throw new CustomHttpException(
+          `Fields ${validationFields.map((f) => f.id).join(', ')} not null validation failed`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.custom.fieldValueNotNull',
+              context: {
+                tableName,
+                fieldName: validationFields.map((f) => f.name).join(', '),
+              },
+            },
+          }
+        );
+      },
+    });
 
     return snapshots;
   }
@@ -994,34 +1829,32 @@ export class RecordService {
     const dbTableName = await this.getDbTableName(tableId);
 
     const nativeQuery = this.knex(dbTableName).whereIn('__id', recordIds).del().toQuery();
-
-    await this.prismaService.txClient().$executeRawUnsafe(nativeQuery);
+    await this.databaseRouter.executeDataPrismaForTable(tableId, nativeQuery);
   }
 
-  private async getFieldsByProjection(
+  public async getFieldsByProjection(
     tableId: string,
     projection?: { [fieldNameOrId: string]: boolean },
-    fieldKeyType: FieldKeyType = FieldKeyType.Id
+    fieldKeyType: FieldKeyType = FieldKeyType.Id,
+    options: { skipUnavailableFields?: boolean } = {}
   ) {
-    const whereParams: Prisma.FieldWhereInput = {};
+    let fields = await this.dataLoaderService.field.load(tableId);
     if (projection) {
       const projectionFieldKeys = Object.entries(projection)
         .filter(([, v]) => v)
         .map(([k]) => k);
       if (projectionFieldKeys.length) {
-        const key = fieldKeyType === FieldKeyType.Id ? 'id' : 'name';
-        whereParams[key] = { in: projectionFieldKeys };
+        fields = fields.filter((field) => projectionFieldKeys.includes(field[fieldKeyType]));
       }
     }
-
-    const fields = await this.prismaService.txClient().field.findMany({
-      where: { tableId, ...whereParams, deletedTime: null },
-    });
+    if (options.skipUnavailableFields) {
+      fields = fields.filter((field) => !field.isPending);
+    }
 
     return fields.map((field) => createFieldInstanceByRaw(field));
   }
 
-  private async getPreviewUrlTokenMap(
+  private async getCachePreviewUrlTokenMap(
     records: ISnapshotBase<IRecord>[],
     fields: IFieldInstance[],
     fieldKeyType: FieldKeyType
@@ -1029,11 +1862,11 @@ export class RecordService {
     const previewToken: string[] = [];
     for (const field of fields) {
       if (field.type === FieldType.Attachment) {
-        const fieldKey = fieldKeyType === FieldKeyType.Id ? field.id : field.name;
+        const fieldKey = field[fieldKeyType];
         for (const record of records) {
-          const cellValue = record.data.fields[fieldKey];
+          const cellValue = this.normalizeAttachmentCellValue(record.data.fields[fieldKey]);
           if (cellValue == null) continue;
-          (cellValue as IAttachmentCellValue).forEach((item) => {
+          cellValue.forEach((item) => {
             if (item.mimetype.startsWith('image/') && item.width && item.height) {
               const { smThumbnailPath, lgThumbnailPath } = generateTableThumbnailPath(item.path);
               previewToken.push(getTableThumbnailToken(smThumbnailPath));
@@ -1049,55 +1882,228 @@ export class RecordService {
     for (let i = 0; i < previewToken.length; i += 1000) {
       const tokenBatch = previewToken.slice(i, i + 1000);
       const previewUrls = await this.cacheService.getMany(
-        tokenBatch.map((token) => `attachment:preview:${token}` as const)
+        tokenBatch.map((token) => getPreviewCacheKey(token))
       );
-      previewUrls.forEach((url, index) => {
-        if (url) {
-          tokenMap[previewToken[i + index]] = url.url;
+      previewUrls.forEach((cacheValue, index) => {
+        const freshUrl = getFreshPreviewCacheUrl(cacheValue);
+        if (freshUrl) {
+          tokenMap[previewToken[i + index]] = freshUrl;
         }
       });
     }
     return tokenMap;
   }
 
-  @Timing()
-  private async recordsPresignedUrl(
+  private async getThumbnailPathTokenMap(
     records: ISnapshotBase<IRecord>[],
     fields: IFieldInstance[],
     fieldKeyType: FieldKeyType
   ) {
-    const tokenUrlMap = await this.getPreviewUrlTokenMap(records, fields, fieldKeyType);
+    const thumbnailTokens: string[] = [];
     for (const field of fields) {
       if (field.type === FieldType.Attachment) {
-        const fieldKey = fieldKeyType === FieldKeyType.Id ? field.id : field.name;
+        const fieldKey = field[fieldKeyType];
         for (const record of records) {
-          const cellValue = record.data.fields[fieldKey];
-          const presignedCellValue = await this.getAttachmentPresignedCellValue(
-            cellValue as IAttachmentCellValue,
-            tokenUrlMap
-          );
-          if (presignedCellValue == null) continue;
-
-          record.data.fields[fieldKey] = presignedCellValue;
+          const cellValue = this.normalizeAttachmentCellValue(record.data.fields[fieldKey]);
+          if (cellValue == null) continue;
+          cellValue.forEach((item) => {
+            if (isImage(item.mimetype) || isPdf(item.mimetype)) {
+              thumbnailTokens.push(getTableThumbnailToken(item.token));
+            }
+          });
         }
       }
     }
-    return records;
+    if (thumbnailTokens.length === 0) {
+      return {};
+    }
+    const attachments = await this.prismaService.attachments.findMany({
+      where: { token: { in: thumbnailTokens }, thumbnailPath: { not: null } },
+      select: { token: true, thumbnailPath: true },
+    });
+    return attachments.reduce<
+      Record<
+        string,
+        | {
+            sm?: string;
+            lg?: string;
+          }
+        | undefined
+      >
+    >((acc, cur) => {
+      acc[cur.token] = cur.thumbnailPath ? JSON.parse(cur.thumbnailPath) : undefined;
+      return acc;
+    }, {});
   }
 
-  async getAttachmentPresignedCellValue(
-    cellValue: IAttachmentCellValue | null,
-    tokenUrlMap?: Record<string, string>
+  @Timing()
+  private async recordsPresignedUrl(
+    records: ISnapshotBase<IRecord>[],
+    fields: IFieldInstance[],
+    fieldKeyType: FieldKeyType,
+    context?: IRecordsPresignedUrlContext
   ) {
+    try {
+      if (records.length === 0 || fields.findIndex((f) => f.type === FieldType.Attachment) === -1) {
+        return records;
+      }
+      const cacheTokenUrlMap = await this.getCachePreviewUrlTokenMap(records, fields, fieldKeyType);
+      const thumbnailPathTokenMap = await this.getThumbnailPathTokenMap(
+        records,
+        fields,
+        fieldKeyType
+      );
+      for (const field of fields) {
+        if (field.type === FieldType.Attachment) {
+          const fieldKey = field[fieldKeyType];
+          for (const record of records) {
+            const cellValue = this.normalizeAttachmentCellValue(record.data.fields[fieldKey]);
+            const presignedCellValue = await this.getAttachmentPresignedCellValue(
+              cellValue,
+              cacheTokenUrlMap,
+              thumbnailPathTokenMap
+            );
+            if (presignedCellValue == null) continue;
+
+            record.data.fields[fieldKey] = presignedCellValue;
+          }
+        }
+      }
+      return records;
+    } catch (error) {
+      this.captureRecordSnapshotPresignedUrlError(error, records, fields, fieldKeyType, context);
+      throw error;
+    }
+  }
+
+  private normalizeAttachmentCellValue(cellValue: unknown): IAttachmentCellValue | null {
     if (cellValue == null) {
       return null;
     }
 
+    return Array.isArray(cellValue) ? cellValue : [cellValue as IAttachmentCellValue[number]];
+  }
+
+  private captureRecordSnapshotPresignedUrlError(
+    error: unknown,
+    records: ISnapshotBase<IRecord>[],
+    fields: IFieldInstance[],
+    fieldKeyType: FieldKeyType,
+    context?: IRecordsPresignedUrlContext
+  ) {
+    const exception = error instanceof Error ? error : new Error(String(error));
+    const attachmentFields = fields
+      .filter((field) => field.type === FieldType.Attachment)
+      .map((field) =>
+        removeUndefined({
+          id: field.id,
+          dbFieldName: field.dbFieldName,
+          name: field.name,
+          fieldKey: field[fieldKeyType],
+        })
+      );
+    const valueShapes = this.getAttachmentValueShapeSummaries(records, fields, fieldKeyType);
+    const recordIds = context?.recordIds ?? records.map((record) => record.id);
+    const logContext = removeUndefined({
+      message: 'Record snapshot attachment presigned url failed',
+      error: exception.message,
+      tableId: context?.tableId,
+      viewQueryDbTableName: context?.viewQueryDbTableName,
+      fieldKeyType,
+      cellFormat: context?.cellFormat,
+      useQueryModel: context?.useQueryModel,
+      recordCount: records.length,
+      recordIds: recordIds.slice(0, 20),
+      projectionFieldIds: context?.projectionFieldIds,
+      attachmentFields,
+      valueShapes,
+    });
+
+    this.logger.error(logContext, exception.stack);
+
+    Sentry.withScope((scope) => {
+      scope.setLevel('error');
+      scope.setTag('feature', 'record-snapshot-presigned-url');
+      scope.setTag('field_key_type', fieldKeyType);
+      scope.setTag('record_count', String(records.length));
+      scope.setTag('attachment_field_count', String(attachmentFields.length));
+      if (context?.useQueryModel) {
+        scope.setTag('teable.version', 'v2');
+      }
+      if (context?.tableId) {
+        scope.setTag('table.id', context.tableId);
+      }
+      scope.setContext('record_snapshot_presigned_url', logContext);
+      Sentry.captureException(exception, {
+        mechanism: { handled: true, type: 'record.snapshot.presigned_url' },
+      });
+    });
+  }
+
+  private getAttachmentValueShapeSummaries(
+    records: ISnapshotBase<IRecord>[],
+    fields: IFieldInstance[],
+    fieldKeyType: FieldKeyType
+  ) {
+    return fields
+      .filter((field) => field.type === FieldType.Attachment)
+      .flatMap((field) => {
+        const fieldKey = field[fieldKeyType];
+        return records.map((record) =>
+          removeUndefined({
+            recordId: record.id,
+            fieldId: field.id,
+            dbFieldName: field.dbFieldName,
+            fieldKey,
+            ...this.getAttachmentValueShape(record.data.fields[fieldKey]),
+          })
+        );
+      })
+      .slice(0, 20);
+  }
+
+  private getAttachmentValueShape(cellValue: unknown) {
+    if (cellValue == null) {
+      return { valueType: 'null', isArray: false };
+    }
+
+    const isArrayValue = Array.isArray(cellValue);
+    const sampleValue = isArrayValue ? cellValue[0] : cellValue;
+    const sampleRecord =
+      sampleValue && typeof sampleValue === 'object' && !Array.isArray(sampleValue)
+        ? (sampleValue as Record<string, unknown>)
+        : undefined;
+
+    return removeUndefined({
+      valueType: isArrayValue ? 'array' : typeof cellValue,
+      isArray: isArrayValue,
+      arrayLength: isArrayValue ? cellValue.length : undefined,
+      itemValueType: Array.isArray(sampleValue) ? 'array' : typeof sampleValue,
+      itemKeys: sampleRecord ? Object.keys(sampleRecord).sort().slice(0, 20) : undefined,
+      hasToken: sampleRecord ? typeof sampleRecord.token === 'string' : undefined,
+      hasPath: sampleRecord ? typeof sampleRecord.path === 'string' : undefined,
+      hasMimetype: sampleRecord ? typeof sampleRecord.mimetype === 'string' : undefined,
+    });
+  }
+
+  async invalidateAttachmentPresignedUrlCache(tokens: string[]) {
+    await Promise.all(tokens.map((token) => this.cacheService.del(getPreviewCacheKey(token))));
+  }
+
+  async getAttachmentPresignedCellValue(
+    cellValue: IAttachmentCellValueLike | null,
+    cacheTokenUrlMap?: Record<string, string>,
+    thumbnailPathTokenMap?: Record<string, { sm?: string; lg?: string } | undefined>
+  ) {
+    const normalizedCellValue = this.normalizeAttachmentCellValue(cellValue);
+    if (normalizedCellValue == null) {
+      return null;
+    }
     return await Promise.all(
-      cellValue.map(async (item) => {
-        const { path, mimetype, token, width, height } = item;
+      normalizedCellValue.map(async (item) => {
+        const { path, mimetype, token } = item;
         const presignedUrl =
-          tokenUrlMap?.[token] ??
+          cacheTokenUrlMap?.[token] ??
           (await this.attachmentStorageService.getPreviewUrlByPath(
             StorageAdapter.getBucket(UploadType.Table),
             path,
@@ -1105,60 +2111,94 @@ export class RecordService {
             undefined,
             {
               'Content-Type': mimetype,
-              'Content-Disposition': `attachment; filename="${item.name}"`,
+              'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(item.name)}`,
             }
           ));
-        if (width && height && mimetype.startsWith('image/')) {
-          const { smThumbnailPath, lgThumbnailPath } = generateTableThumbnailPath(path);
-          const smThumbnailToken = getTableThumbnailToken(smThumbnailPath);
-          const lgThumbnailToken = getTableThumbnailToken(lgThumbnailPath);
-          const selected: ('sm' | 'lg')[] = [];
-          const cacheSmThumbnailUrl = tokenUrlMap?.[smThumbnailToken];
-          const cacheLgThumbnailUrl = tokenUrlMap?.[lgThumbnailToken];
-          if (!cacheSmThumbnailUrl) {
-            selected.push('sm');
+        let smThumbnailUrl: string | undefined;
+        let lgThumbnailUrl: string | undefined;
+        const isImg = isImage(mimetype);
+        const thumbnailMimetype = resolveThumbnailMimetype(mimetype);
+        if (thumbnailPathTokenMap && thumbnailPathTokenMap[token]) {
+          const { sm: smThumbnailPath, lg: lgThumbnailPath } = thumbnailPathTokenMap[token]!;
+          if (smThumbnailPath) {
+            smThumbnailUrl =
+              cacheTokenUrlMap?.[getTableThumbnailToken(smThumbnailPath)] ??
+              (await this.attachmentStorageService.getTableThumbnailUrl(
+                smThumbnailPath,
+                thumbnailMimetype
+              ));
           }
-          if (!cacheLgThumbnailUrl) {
-            selected.push('lg');
+          if (lgThumbnailPath) {
+            lgThumbnailUrl =
+              cacheTokenUrlMap?.[getTableThumbnailToken(lgThumbnailPath)] ??
+              (await this.attachmentStorageService.getTableThumbnailUrl(
+                lgThumbnailPath,
+                thumbnailMimetype
+              ));
           }
-          const { smThumbnailUrl, lgThumbnailUrl } =
-            await this.attachmentStorageService.getTableAttachmentThumbnailUrl(path, selected);
-          return {
-            ...item,
-            smThumbnailUrl: cacheSmThumbnailUrl ?? smThumbnailUrl,
-            lgThumbnailUrl: cacheLgThumbnailUrl ?? lgThumbnailUrl,
-            presignedUrl,
-          };
         }
+
         return {
           ...item,
           presignedUrl,
+          smThumbnailUrl: isImg ? smThumbnailUrl || presignedUrl : smThumbnailUrl,
+          lgThumbnailUrl: isImg ? lgThumbnailUrl || presignedUrl : lgThumbnailUrl,
         };
       })
     );
   }
 
-  async getSnapshotBulk(
-    tableId: string,
-    recordIds: string[],
-    projection?: { [fieldNameOrId: string]: boolean },
-    fieldKeyType: FieldKeyType = FieldKeyType.Id, // for convince of collaboration, getSnapshotBulk use id as field key by default.
-    cellFormat = CellFormat.Json
+  private async getSnapshotBulkInner(
+    builder: Knex.QueryBuilder,
+    viewQueryDbTableName: string,
+    query: {
+      tableId: string;
+      recordIds: string[];
+      projection?: { [fieldNameOrId: string]: boolean };
+      fieldKeyType: FieldKeyType;
+      cellFormat: CellFormat;
+      useQueryModel: boolean;
+    }
   ): Promise<ISnapshotBase<IRecord>[]> {
-    const dbTableName = await this.getDbTableName(tableId);
+    const { tableId, recordIds, projection, fieldKeyType, cellFormat } = query;
+    const fields = await this.getFieldsByProjection(tableId, projection, fieldKeyType, {
+      skipUnavailableFields: true,
+    });
+    const fieldIds = fields.map((f) => f.id);
 
-    const fields = await this.getFieldsByProjection(tableId, projection, fieldKeyType);
-    const fieldNames = fields.map((f) => f.dbFieldName).concat(Array.from(preservedDbFieldNames));
-    const nativeQuery = this.knex(dbTableName)
-      .select(fieldNames)
-      .whereIn('__id', recordIds)
-      .toQuery();
+    const { qb: queryBuilder } = await this.recordQueryBuilder.createRecordQueryBuilder(
+      viewQueryDbTableName,
+      {
+        tableId,
+        viewId: undefined,
+        useQueryModel: query.useQueryModel,
+        projection: fieldIds,
+        restrictRecordIds: recordIds,
+        builder,
+      }
+    );
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<
+    const nativeQuery = queryBuilder.whereIn('__id', recordIds).toQuery();
+
+    this.logger.debug('getSnapshotBulkInner query %s', nativeQuery);
+
+    let result: ({ [fieldName: string]: unknown } & IVisualTableDefaultField)[];
+    try {
+      result = await this.databaseRouter.queryDataPrismaForTable<
         ({ [fieldName: string]: unknown } & IVisualTableDefaultField)[]
-      >(nativeQuery);
+      >(tableId, nativeQuery);
+    } catch (error) {
+      this.handleRawQueryError(error, nativeQuery, {
+        tableId,
+        viewQueryDbTableName,
+        recordIdsCount: recordIds.length,
+        recordIds: recordIds.slice(0, 20),
+        projectionFieldIds: fieldIds,
+        fieldKeyType,
+        cellFormat,
+        useQueryModel: query.useQueryModel,
+      });
+    }
 
     const recordIdsMap = recordIds.reduce(
       (acc, recordId, currentIndex) => {
@@ -1170,15 +2210,17 @@ export class RecordService {
 
     recordIds.forEach((recordId) => {
       if (!(recordId in recordIdsMap)) {
-        throw new NotFoundException(`Record ${recordId} not found`);
+        throw new CustomHttpException(`Record ${recordId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.record.notFound',
+          },
+        });
       }
     });
 
-    const primaryFieldRaw = await this.prismaService.txClient().field.findFirstOrThrow({
-      where: { tableId, isPrimary: true, deletedTime: null },
-    });
+    await this.hydrateUnresolvedUserCellTitles(result, fields);
+    const primaryField = await this.getPrimaryField(tableId);
 
-    const primaryField = createFieldInstanceByRaw(primaryFieldRaw);
     const snapshots = result
       .sort((a, b) => {
         return recordIdsMap[a.__id] - recordIdsMap[b.__id];
@@ -1206,53 +2248,370 @@ export class RecordService {
         };
       });
     if (cellFormat === CellFormat.Json) {
-      return await this.recordsPresignedUrl(snapshots, fields, fieldKeyType);
+      return await this.recordsPresignedUrl(snapshots, fields, fieldKeyType, {
+        tableId,
+        viewQueryDbTableName,
+        fieldKeyType,
+        cellFormat,
+        useQueryModel: query.useQueryModel,
+        recordIds,
+        projectionFieldIds: fieldIds,
+      });
     }
     return snapshots;
   }
 
+  async getSnapshotBulkWithPermission(
+    tableId: string,
+    recordIds: string[],
+    projection?: { [fieldNameOrId: string]: boolean },
+    fieldKeyType: FieldKeyType = FieldKeyType.Id, // for convince of collaboration, getSnapshotBulk use id as field key by default.
+    cellFormat = CellFormat.Json,
+    useQueryModel = false
+  ) {
+    const dbTableName = await this.getDbTableName(tableId);
+    const { viewCte, builder, enabledFieldIds } = await this.recordPermissionService.wrapView(
+      tableId,
+      this.knex.queryBuilder(),
+      {
+        keepPrimaryKey: true,
+      }
+    );
+    const viewQueryDbTableName = viewCte ?? dbTableName;
+    const finalProjection =
+      projection ??
+      (await this.convertEnabledFieldIdsToProjection(tableId, enabledFieldIds, fieldKeyType));
+    return this.getSnapshotBulkInner(builder, viewQueryDbTableName, {
+      tableId,
+      recordIds,
+      projection: finalProjection,
+      fieldKeyType,
+      cellFormat,
+      useQueryModel,
+    });
+  }
+
+  async getSnapshotBulk(
+    tableId: string,
+    recordIds: string[],
+    projection?: { [fieldNameOrId: string]: boolean },
+    fieldKeyType: FieldKeyType = FieldKeyType.Id, // for convince of collaboration, getSnapshotBulk use id as field key by default.
+    cellFormat = CellFormat.Json,
+    useQueryModel = false
+  ): Promise<ISnapshotBase<IRecord>[]> {
+    const dbTableName = await this.getDbTableName(tableId);
+    return this.getSnapshotBulkInner(this.knex.queryBuilder(), dbTableName, {
+      tableId,
+      recordIds,
+      projection,
+      fieldKeyType,
+      cellFormat,
+      useQueryModel,
+    });
+  }
+
   async getDocIdsByQuery(
     tableId: string,
-    query: IGetRecordsRo
+    query: IGetRecordsRo,
+    useQueryModel = false
   ): Promise<{ ids: string[]; extra?: IExtraResult }> {
-    const { skip, take = 100 } = query;
+    const { skip, take = 100, ignoreViewQuery } = query;
 
     if (identify(tableId) !== IdPrefix.Table) {
-      throw new InternalServerErrorException('query collection must be table id');
+      throw new CustomHttpException(
+        'Query collection must be table ID',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.aggregation.queryCollectionMustBeTableId',
+          },
+        }
+      );
     }
 
     if (take > 1000) {
-      throw new BadRequestException(`limit can't be greater than ${take}`);
+      throw new CustomHttpException(
+        `The maximum search index result is 1000`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.aggregation.maxSearchIndexResult',
+          },
+        }
+      );
     }
 
-    const { groupPoints, filter: filterWithGroup } = await this.getGroupRelatedData(tableId, query);
-    const { queryBuilder, dbTableName } = await this.buildFilterSortQuery(tableId, {
-      ...query,
+    const viewId = ignoreViewQuery ? undefined : query.viewId;
+    const {
+      groupPoints,
+      allGroupHeaderRefs,
       filter: filterWithGroup,
-    });
+    } = await this.getGroupRelatedData(
+      tableId,
+      {
+        ...query,
+        viewId,
+      },
+      useQueryModel
+    );
+    const { queryBuilder, dbTableName, alias } = await this.buildFilterSortQuery(
+      tableId,
+      {
+        ...query,
+        filter: filterWithGroup,
+      },
+      useQueryModel
+    );
+    // This path only needs record IDs. Avoid evaluating display projections such as
+    // CreatedBy user lookups, which may reference meta-plane tables outside BYODB.
+    queryBuilder.clearSelect().select(`${alias}.__id`);
 
-    queryBuilder.select(this.knex.ref(`${dbTableName}.__id`));
-
-    queryBuilder.offset(skip);
+    skip && queryBuilder.offset(skip);
     if (take !== -1) {
       queryBuilder.limit(take);
     }
 
-    this.logger.debug('getRecordsQuery: %s', queryBuilder.toQuery());
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ __id: string }[]>(queryBuilder.toQuery());
+    const sqlNative = queryBuilder.toSQL().toNative();
+    const sqlDebug = queryBuilder.toQuery();
+    this.logger.debug('getRecordsQuery: %s', sqlDebug);
+    let result: { __id: string }[];
+    try {
+      result = await this.databaseRouter.queryDataPrismaForTable<{ __id: string }[]>(
+        tableId,
+        sqlNative.sql,
+        ...sqlNative.bindings
+      );
+    } catch (error) {
+      this.handleRawQueryError(error, sqlNative.sql, {
+        tableId,
+        dbTableName,
+        viewId,
+        ignoreViewQuery,
+        useQueryModel,
+        take,
+        skip,
+        orderBy: query.orderBy,
+        groupBy: query.groupBy,
+        filter: filterWithGroup,
+        search: query.search,
+        filterLinkCellCandidate: query.filterLinkCellCandidate,
+        filterLinkCellSelected: query.filterLinkCellSelected,
+        selectedRecordIds: query.selectedRecordIds,
+        bindings: sqlNative.bindings,
+        sqlDebug,
+      });
+    }
     const ids = result.map((r) => r.__id);
 
-    return { ids, extra: { groupPoints } };
+    const {
+      builder: searchWrapBuilder,
+      viewCte: searchViewCte,
+      enabledFieldIds,
+    } = await this.recordPermissionService.wrapView(tableId, this.knex.queryBuilder(), {
+      keepPrimaryKey: Boolean(query.filterLinkCellSelected),
+      viewId,
+    });
+    // this search step should not abort the query
+    const searchBuilder = searchViewCte
+      ? searchWrapBuilder.from(searchViewCte)
+      : this.knex(dbTableName);
+    try {
+      const searchHitIndex = await this.getSearchHitIndex(
+        tableId,
+        {
+          ...query,
+          projection: query.projection
+            ? enabledFieldIds
+              ? query.projection.filter((id) => enabledFieldIds.includes(id))
+              : query.projection
+            : enabledFieldIds,
+          viewId,
+        },
+        searchBuilder.whereIn('__id', ids),
+        enabledFieldIds
+      );
+      return { ids, extra: { groupPoints, searchHitIndex, allGroupHeaderRefs } };
+    } catch (e) {
+      this.logger.error(`Get search index error: ${(e as Error).message}`, (e as Error)?.stack);
+    }
+
+    return { ids, extra: { groupPoints, allGroupHeaderRefs } };
+  }
+
+  async getSearchFields(
+    originFieldInstanceMap: Record<string, IFieldInstance>,
+    search?: [string, string?, boolean?],
+    viewId?: string,
+    projection?: string[]
+  ) {
+    const maxSearchFieldCount = process.env.MAX_SEARCH_FIELD_COUNT
+      ? toNumber(process.env.MAX_SEARCH_FIELD_COUNT)
+      : DEFAULT_MAX_SEARCH_FIELD_COUNT;
+    let viewColumnMeta: IGridColumnMeta | null = null;
+    const fieldInstanceMap = projection?.length === 0 ? {} : { ...originFieldInstanceMap };
+    if (!search) {
+      return [] as IFieldInstance[];
+    }
+
+    const isSearchAllFields = !search?.[1];
+
+    if (viewId) {
+      const { columnMeta: viewColumnRawMeta } =
+        (await this.prismaService.view.findUnique({
+          where: { id: viewId, deletedTime: null },
+          select: { columnMeta: true },
+        })) || {};
+
+      viewColumnMeta = viewColumnRawMeta ? JSON.parse(viewColumnRawMeta) : null;
+
+      if (viewColumnMeta) {
+        Object.entries(viewColumnMeta).forEach(([key, value]) => {
+          if (get(value, ['hidden'])) {
+            delete fieldInstanceMap[key];
+          }
+        });
+      }
+    }
+
+    if (projection?.length) {
+      Object.keys(fieldInstanceMap).forEach((fieldId) => {
+        if (!projection.includes(fieldId)) {
+          delete fieldInstanceMap[fieldId];
+        }
+      });
+    }
+
+    return uniqBy(
+      orderBy(
+        Object.values(fieldInstanceMap)
+          // shared searchability predicate from @teable/core, also used by
+          // client-side highlighting; must run before the spread below which
+          // strips class methods
+          .filter((field) => field.isSearchable(search[0], { isSearchAllFields }))
+          .map((field) => ({
+            ...field,
+            isStructuredCellValue: field.isStructuredCellValue,
+          }))
+          .filter((field) => {
+            if (!viewColumnMeta) {
+              return true;
+            }
+            return !viewColumnMeta?.[field.id]?.hidden;
+          })
+          .filter((field) => {
+            if (!projection) {
+              return true;
+            }
+            return projection.includes(field.id);
+          })
+          .filter((field) => {
+            if (isSearchAllFields) {
+              return true;
+            }
+
+            const searchArr = search?.[1]?.split(',') || [];
+            return searchArr.includes(field.id);
+          })
+          .map((field) => {
+            return {
+              ...field,
+              order: viewColumnMeta?.[field.id]?.order ?? Number.MIN_SAFE_INTEGER,
+            };
+          }),
+        ['order', 'createTime']
+      ),
+      'id'
+    ).slice(0, maxSearchFieldCount) as unknown as IFieldInstance[];
+  }
+
+  private async getSearchHitIndex(
+    tableId: string,
+    query: IGetRecordsRo,
+    builder: Knex.QueryBuilder,
+    enabledFieldIds?: string[]
+  ) {
+    const { search, viewId, projection, ignoreViewQuery } = query;
+
+    if (!search) {
+      return null;
+    }
+
+    const fieldsRaw = await this.dataLoaderService.field.load(tableId, {
+      id: enabledFieldIds,
+    });
+
+    const fieldInstances = fieldsRaw.map((field) => createFieldInstanceByRaw(field));
+    const fieldInstanceMap = fieldInstances.reduce(
+      (map, field) => {
+        map[field.id] = field;
+        return map;
+      },
+      {} as Record<string, IFieldInstance>
+    );
+    const searchFields = await this.getSearchFields(
+      fieldInstanceMap,
+      search,
+      ignoreViewQuery ? undefined : viewId,
+      projection
+    );
+
+    const tableIndex = await this.tableIndexService.getActivatedTableIndexes(tableId);
+
+    if (searchFields.length === 0) {
+      return null;
+    }
+
+    const newQuery = this.knex
+      .with('current_page_records', builder)
+      .with('search_index', (qb) => {
+        this.dbProvider.searchIndexQuery(
+          qb,
+          'current_page_records',
+          searchFields,
+          {
+            search,
+          },
+          tableIndex,
+          undefined,
+          undefined,
+          undefined
+        );
+      })
+      .from('search_index');
+
+    const searchQuery = newQuery.toQuery();
+
+    this.logger.debug('getSearchHitIndex query: %s', searchQuery);
+
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { __id: string; fieldId: string }[]
+    >(tableId, searchQuery);
+
+    if (!result.length) {
+      return null;
+    }
+
+    return result.map((res) => ({
+      fieldId: res.fieldId,
+      recordId: res.__id,
+    }));
   }
 
   async getRecordsFields(
     tableId: string,
-    query: IGetRecordsRo
+    query: IGetRecordsRo,
+    useQueryModel = true
   ): Promise<Pick<IRecord, 'id' | 'fields'>[]> {
     if (identify(tableId) !== IdPrefix.Table) {
-      throw new InternalServerErrorException('query collection must be table id');
+      throw new CustomHttpException(
+        'Query collection must be table ID',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.aggregation.queryCollectionMustBeTableId',
+          },
+        }
+      );
     }
 
     const {
@@ -1266,6 +2625,7 @@ export class RecordService {
       cellFormat,
       projection,
       viewId,
+      ignoreViewQuery,
       filterLinkCellCandidate,
       filterLinkCellSelected,
     } = query;
@@ -1275,31 +2635,35 @@ export class RecordService {
       this.convertProjection(projection),
       fieldKeyType
     );
-    const fieldNames = fields.map((f) => f.dbFieldName);
 
     const { filter: filterWithGroup } = await this.getGroupRelatedData(tableId, query);
 
-    const { queryBuilder } = await this.buildFilterSortQuery(tableId, {
-      viewId,
-      filter: filterWithGroup,
-      orderBy,
-      search,
-      groupBy,
-      collapsedGroupIds,
-      filterLinkCellCandidate,
-      filterLinkCellSelected,
-    });
-    queryBuilder.select(fieldNames.concat('__id'));
-    queryBuilder.offset(skip);
-    if (take !== -1) {
-      queryBuilder.limit(take);
-    }
+    const { queryBuilder } = await this.buildFilterSortQuery(
+      tableId,
+      {
+        viewId,
+        ignoreViewQuery,
+        filter: filterWithGroup,
+        orderBy,
+        search,
+        groupBy,
+        collapsedGroupIds,
+        filterLinkCellCandidate,
+        filterLinkCellSelected,
+        skip,
+        take,
+      },
+      useQueryModel
+    );
+    skip && queryBuilder.offset(skip);
+    take !== -1 && take && queryBuilder.limit(take);
+    const sql = queryBuilder.toQuery();
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<
-        (Pick<IRecord, 'fields'> & Pick<IVisualTableDefaultField, '__id'>)[]
-      >(queryBuilder.toQuery());
+    this.logger.debug('getRecordsFields query: %s', sql);
+
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      (Pick<IRecord, 'fields'> & Pick<IVisualTableDefaultField, '__id'>)[]
+    >(tableId, sql);
 
     return result.map((record) => {
       return {
@@ -1309,13 +2673,31 @@ export class RecordService {
     });
   }
 
+  private async getPrimaryField(tableId: string) {
+    const field = await this.dataLoaderService.field.load(tableId, {
+      isPrimary: [true],
+    });
+    if (!field.length) {
+      throw new CustomHttpException(
+        `Could not find primary field in table ${tableId}`,
+        HttpErrorCode.NOT_FOUND,
+        {
+          localization: {
+            i18nKey: 'httpErrors.table.notFoundPrimaryField',
+          },
+        }
+      );
+    }
+    return createFieldInstanceByRaw(field[0]);
+  }
+
   async getRecordsHeadWithTitles(tableId: string, titles: string[]) {
     const dbTableName = await this.getDbTableName(tableId);
-    const field = await this.prismaService.txClient().field.findFirst({
-      where: { tableId, isPrimary: true, deletedTime: null },
-    });
-    if (!field) {
-      throw new BadRequestException(`Could not find primary index ${tableId}`);
+    const field = await this.getPrimaryField(tableId);
+
+    // only text field support type cast to title
+    if (field.dbFieldType !== DbFieldType.Text) {
+      return [];
     }
 
     const queryBuilder = this.knex(dbTableName)
@@ -1324,17 +2706,15 @@ export class RecordService {
 
     const querySql = queryBuilder.toQuery();
 
-    return this.prismaService.txClient().$queryRawUnsafe<{ id: string; title: string }[]>(querySql);
+    return this.databaseRouter.queryDataPrismaForTable<{ id: string; title: string }[]>(
+      tableId,
+      querySql
+    );
   }
 
   async getRecordsHeadWithIds(tableId: string, recordIds: string[]) {
     const dbTableName = await this.getDbTableName(tableId);
-    const field = await this.prismaService.txClient().field.findFirst({
-      where: { tableId, isPrimary: true, deletedTime: null },
-    });
-    if (!field) {
-      throw new BadRequestException(`Could not find primary index ${tableId}`);
-    }
+    const field = await this.getPrimaryField(tableId);
 
     const queryBuilder = this.knex(dbTableName)
       .select({ title: field.dbFieldName, id: '__id' })
@@ -1342,7 +2722,14 @@ export class RecordService {
 
     const querySql = queryBuilder.toQuery();
 
-    return this.prismaService.txClient().$queryRawUnsafe<{ id: string; title: string }[]>(querySql);
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { id: string; title: unknown }[]
+    >(tableId, querySql);
+
+    return result.map((r) => ({
+      id: r.id,
+      title: field.cellValue2String(r.title),
+    }));
   }
 
   async filterRecordIdsByFilter(
@@ -1350,15 +2737,18 @@ export class RecordService {
     recordIds: string[],
     filter?: IFilter | null
   ): Promise<string[]> {
-    const { queryBuilder, dbTableName } = await this.buildFilterSortQuery(tableId, {
-      filter,
-    });
-
-    queryBuilder.whereIn(`${dbTableName}.__id`, recordIds);
-    queryBuilder.select(this.knex.ref(`${dbTableName}.__id`));
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ __id: string }[]>(queryBuilder.toQuery());
+    const { queryBuilder, alias } = await this.buildFilterSortQuery(
+      tableId,
+      {
+        filter,
+      },
+      true
+    );
+    queryBuilder.whereIn(`${alias}.__id`, recordIds);
+    const result = await this.databaseRouter.queryDataPrismaForTable<{ __id: string }[]>(
+      tableId,
+      queryBuilder.toQuery()
+    );
     return result.map((r) => r.__id);
   }
 
@@ -1372,10 +2762,13 @@ export class RecordService {
   private async groupDbCollection2GroupPoints(
     groupResult: { [key: string]: unknown; __c: number }[],
     groupFields: IFieldInstance[],
+    groupBy: IGroup | undefined,
     collapsedGroupIds: string[] | undefined,
     rowCount: number
   ) {
     const groupPoints: IGroupPoint[] = [];
+    const allGroupHeaderRefs: IGroupHeaderRef[] = [];
+    const collapsedGroupIdsSet = new Set(collapsedGroupIds);
     let fieldValues: unknown[] = [Symbol(), Symbol(), Symbol()];
     let curRowCount = 0;
     let collapsedDepth = Number.MAX_SAFE_INTEGER;
@@ -1385,13 +2778,18 @@ export class RecordService {
       const { __c: count } = item;
 
       for (let index = 0; index < groupFields.length; index++) {
-        if (index > collapsedDepth) break;
-
         const field = groupFields[index];
         const { id, dbFieldName } = field;
         const fieldValue = convertValueToStringify(item[dbFieldName]);
 
         if (fieldValues[index] === fieldValue) continue;
+
+        const flagString = `${id}_${[...fieldValues.slice(0, index), fieldValue].join('_')}`;
+        const groupId = String(string2Hash(flagString));
+
+        allGroupHeaderRefs.push({ id: groupId, depth: index });
+
+        if (index > collapsedDepth) break;
 
         // Reset the collapsedDepth when encountering the next peer grouping
         collapsedDepth = Number.MAX_SAFE_INTEGER;
@@ -1399,9 +2797,7 @@ export class RecordService {
         fieldValues[index] = fieldValue;
         fieldValues = fieldValues.map((value, idx) => (idx > index ? Symbol() : value));
 
-        const flagString = `${id}_${fieldValues.slice(0, index + 1).join('_')}`;
-        const groupId = String(string2Hash(flagString));
-        const isCollapsedInner = collapsedGroupIds?.includes(groupId) ?? false;
+        const isCollapsedInner = collapsedGroupIdsSet.has(groupId) ?? false;
         let value = field.convertDBValue2CellValue(fieldValue);
 
         if (field.type === FieldType.Attachment) {
@@ -1439,7 +2835,10 @@ export class RecordService {
       );
     }
 
-    return groupPoints;
+    return {
+      groupPoints,
+      allGroupHeaderRefs,
+    };
   }
 
   private getFilterByCollapsedGroup({
@@ -1510,102 +2909,194 @@ export class RecordService {
     return filterQuery;
   }
 
-  private async getRowCountByFilter(
+  async getRowCountByFilter(
     dbTableName: string,
     fieldInstanceMap: Record<string, IFieldInstance>,
+    tableId: string,
     filter?: IFilter,
-    search?: [string, string]
+    search?: [string, string?, boolean?],
+    viewId?: string,
+    useQueryModel = false,
+    projection?: string[]
   ) {
     const withUserId = this.cls.get('user.id');
-    const queryBuilder = this.knex(dbTableName);
+    const wrap = await this.recordPermissionService.wrapView(
+      tableId,
+      this.knex.queryBuilder(),
+      viewId
+        ? {
+            viewId,
+          }
+        : undefined
+    );
 
-    if (filter) {
-      this.dbProvider
-        .filterQuery(queryBuilder, fieldInstanceMap, filter, { withUserId })
-        .appendQueryBuilder();
+    const { qb, selectionMap } = await this.recordQueryBuilder.createRecordAggregateBuilder(
+      wrap.viewCte ?? dbTableName,
+      {
+        tableId,
+        aggregationFields: [],
+        viewId,
+        filter,
+        currentUserId: withUserId,
+        useQueryModel,
+        builder: wrap.builder,
+        projection,
+      }
+    );
+
+    if (search && search[2]) {
+      const searchFields = await this.getSearchFields(
+        fieldInstanceMap,
+        search,
+        viewId,
+        wrap.enabledFieldIds
+      );
+      const tableIndex = await this.tableIndexService.getActivatedTableIndexes(tableId);
+      qb.where((builder) => {
+        this.dbProvider.searchQuery(builder, searchFields, tableIndex, search, { selectionMap });
+      });
     }
 
-    if (search) {
-      const handledSearch = search ? this.parseSearch(search, fieldInstanceMap) : undefined;
-      this.dbProvider.searchQuery(queryBuilder, fieldInstanceMap, handledSearch);
-    }
-
-    const rowCountSql = queryBuilder.count({ count: '*' });
-    const result = await this.prismaService.$queryRawUnsafe<{ count?: number }[]>(
-      rowCountSql.toQuery()
+    const rowCountSql = qb.count({ count: '*' });
+    const sql = rowCountSql.toQuery();
+    this.logger.debug('getRowCountSql: %s', sql);
+    const result = await this.databaseRouter.queryDataPrismaForTable<{ count?: number }[]>(
+      tableId,
+      sql
     );
     return Number(result[0].count);
   }
 
-  public async getGroupRelatedData(tableId: string, query?: IGetRecordsRo) {
-    const { viewId, groupBy: extraGroupBy, filter, search, collapsedGroupIds } = query || {};
+  public async getGroupRelatedData(tableId: string, query?: IGetRecordsRo, useQueryModel = false) {
+    const { groupBy: extraGroupBy, filter, search, ignoreViewQuery, queryId } = query || {};
     let groupPoints: IGroupPoint[] = [];
+    let allGroupHeaderRefs: IGroupHeaderRef[] = [];
+    let collapsedGroupIds = query?.collapsedGroupIds;
 
-    const groupBy = parseGroup(extraGroupBy);
+    if (queryId) {
+      const cacheKey = `query-params:${queryId}` as const;
+      const cache = await this.cacheService.get(cacheKey);
+      if (cache) {
+        collapsedGroupIds = (cache.queryParams as IGetRecordsRo)?.collapsedGroupIds;
+      }
+    }
 
-    if (!groupBy?.length) {
+    const fullGroupBy = parseGroup(extraGroupBy);
+
+    if (!fullGroupBy?.length) {
       return {
         groupPoints,
         filter,
       };
     }
 
+    const viewId = ignoreViewQuery ? undefined : query?.viewId;
     const viewRaw = await this.getTinyView(tableId, viewId);
+    const {
+      viewCte,
+      builder: permissionBuilder,
+      enabledFieldIds,
+    } = await this.recordPermissionService.wrapView(tableId, this.knex.queryBuilder(), {
+      keepPrimaryKey: Boolean(query?.filterLinkCellSelected),
+      viewId,
+    });
     const fieldInstanceMap = (await this.getNecessaryFieldMap(
       tableId,
       filter,
       undefined,
-      groupBy,
-      search
+      fullGroupBy,
+      search,
+      enabledFieldIds
     ))!;
+    const enabledFieldIdSet = enabledFieldIds ? new Set(enabledFieldIds) : undefined;
+    const groupBy = fullGroupBy.filter(
+      (item) =>
+        fieldInstanceMap[item.fieldId] &&
+        (!enabledFieldIdSet || enabledFieldIdSet.has(item.fieldId))
+    );
+
+    if (!groupBy?.length) {
+      return {
+        groupPoints,
+        filter,
+        builder: permissionBuilder,
+      };
+    }
+
     const dbTableName = await this.getDbTableName(tableId);
 
     const filterStr = viewRaw?.filter;
     const mergedFilter = mergeWithDefaultFilter(filterStr, filter);
     const groupFieldIds = groupBy.map((item) => item.fieldId);
 
-    const queryBuilder = this.knex(dbTableName);
+    const withUserId = this.cls.get('user.id');
+    const shouldUseQueryModel = useQueryModel && !viewCte;
+    const searchFields = search?.[2]
+      ? await this.getSearchFields(fieldInstanceMap, search, viewId)
+      : [];
+    const aggregateProjection = this.resolveAggregateProjection({
+      groupBy,
+      filter: mergedFilter,
+      searchFields,
+      allowedFieldIds: enabledFieldIds,
+    });
+    const { qb: queryBuilder, selectionMap } =
+      await this.recordQueryBuilder.createRecordAggregateBuilder(viewCte ?? dbTableName, {
+        tableId,
+        viewId,
+        filter: mergedFilter,
+        aggregationFields: [
+          {
+            fieldId: '*',
+            statisticFunc: StatisticsFunc.Count,
+            alias: '__c',
+          },
+        ],
+        groupBy,
+        currentUserId: withUserId,
+        useQueryModel: shouldUseQueryModel,
+        builder: permissionBuilder,
+        projection: aggregateProjection,
+      });
 
-    if (mergedFilter) {
-      const withUserId = this.cls.get('user.id');
-      this.dbProvider
-        .filterQuery(queryBuilder, fieldInstanceMap, mergedFilter, { withUserId })
-        .appendQueryBuilder();
+    if (search && search[2]) {
+      const tableIndex = await this.tableIndexService.getActivatedTableIndexes(tableId);
+      queryBuilder.where((builder) => {
+        this.dbProvider.searchQuery(builder, searchFields, tableIndex, search, { selectionMap });
+      });
     }
 
-    if (search) {
-      const handledSearch = search ? this.parseSearch(search, fieldInstanceMap) : undefined;
-      this.dbProvider.searchQuery(queryBuilder, fieldInstanceMap, handledSearch);
-    }
-
-    this.dbProvider.sortQuery(queryBuilder, fieldInstanceMap, groupBy).appendSortBuilder();
-    this.dbProvider.groupQuery(queryBuilder, fieldInstanceMap, groupFieldIds).appendGroupBuilder();
-
-    queryBuilder.count({ __c: '*' }).limit(this.thresholdConfig.maxGroupPoints);
+    queryBuilder.limit(this.thresholdConfig.maxGroupPoints);
 
     const groupSql = queryBuilder.toQuery();
-    const groupFields = groupFieldIds.map((fieldId) => fieldInstanceMap[fieldId]);
+    this.logger.debug('groupSql: %s', groupSql);
+    const groupFields = groupFieldIds.map((fieldId) => fieldInstanceMap[fieldId]).filter(Boolean);
     const rowCount = await this.getRowCountByFilter(
       dbTableName,
       fieldInstanceMap,
+      tableId,
       mergedFilter,
-      search
+      search,
+      viewId,
+      useQueryModel,
+      aggregateProjection
     );
 
     try {
-      const result =
-        await this.prismaService.$queryRawUnsafe<{ [key: string]: unknown; __c: number }[]>(
-          groupSql
-        );
-
-      groupPoints = await this.groupDbCollection2GroupPoints(
+      const result = await this.databaseRouter.queryDataPrismaForTable<
+        { [key: string]: unknown; __c: number }[]
+      >(tableId, groupSql);
+      const pointsResult = await this.groupDbCollection2GroupPoints(
         result,
         groupFields,
+        groupBy,
         collapsedGroupIds,
         rowCount
       );
+      groupPoints = pointsResult.groupPoints;
+      allGroupHeaderRefs = pointsResult.allGroupHeaderRefs;
     } catch (error) {
-      console.log(`Get group points error in table ${tableId}: `, error);
+      this.logger.error(`Get group points error in table ${tableId}: `, error);
     }
 
     const filterWithCollapsed = this.getFilterByCollapsedGroup({
@@ -1615,6 +3106,134 @@ export class RecordService {
       collapsedGroupIds,
     });
 
-    return { groupPoints, filter: mergeFilter(filter, filterWithCollapsed) };
+    return {
+      groupPoints,
+      allGroupHeaderRefs,
+      filter: mergeFilter(filter, filterWithCollapsed),
+      builder: permissionBuilder,
+    };
+  }
+
+  async getRecordStatus(
+    tableId: string,
+    recordId: string,
+    query: IGetRecordsRo
+  ): Promise<IRecordStatusVo> {
+    const dbTableName = await this.getDbTableName(tableId);
+    const queryBuilder = this.knex(dbTableName).select('__id').where('__id', recordId).limit(1);
+
+    const result = await this.databaseRouter.queryDataPrismaForTable<{ __id: string }[]>(
+      tableId,
+      queryBuilder.toQuery()
+    );
+
+    const isDeleted = result.length === 0;
+
+    if (isDeleted) {
+      return { isDeleted, isVisible: false };
+    }
+
+    const queryResult = await this.getDocIdsByQuery(
+      tableId,
+      {
+        ignoreViewQuery: query.ignoreViewQuery ?? false,
+        viewId: query.viewId,
+        skip: query.skip,
+        take: query.take,
+        filter: query.filter,
+        orderBy: query.orderBy,
+        search: query.search,
+        groupBy: query.groupBy,
+        filterLinkCellCandidate: query.filterLinkCellCandidate,
+        filterLinkCellSelected: query.filterLinkCellSelected,
+        selectedRecordIds: query.selectedRecordIds,
+      },
+      true
+    );
+    const isVisible = queryResult.ids.includes(recordId);
+    return { isDeleted, isVisible };
+  }
+
+  async getRecordsCollaborators(
+    tableId: string,
+    query: IRecordGetCollaboratorsRo & { filter?: IFilter | null }
+  ) {
+    const { fieldId, skip, take, search, filter } = query;
+    const [fieldRaw] = await this.dataLoaderService.field.load(tableId, {
+      id: [fieldId],
+    });
+    if (
+      !fieldRaw ||
+      ![FieldType.User, FieldType.CreatedBy, FieldType.LastModifiedBy].includes(
+        fieldRaw.type as FieldType
+      )
+    ) {
+      throw new CustomHttpException(
+        'field type is not user-related field',
+        HttpErrorCode.RESTRICTED_RESOURCE,
+        {
+          localization: {
+            i18nKey: 'httpErrors.share.fieldNotUserRelatedField',
+          },
+        }
+      );
+    }
+    const { queryBuilder } = await this.buildFilterSortQuery(
+      tableId,
+      {
+        filter,
+      },
+      true
+    );
+    const collaboratorsQueryBuilder = this.knex.queryBuilder().with('table_records', queryBuilder);
+
+    const { dbFieldName, isMultipleCellValue } = fieldRaw;
+    collaboratorsQueryBuilder.whereNotNull(dbFieldName);
+    collaboratorsQueryBuilder.from('table_records');
+    this.dbProvider.shareFilterCollaboratorsQuery(
+      collaboratorsQueryBuilder,
+      dbFieldName,
+      isMultipleCellValue
+    );
+
+    const collaboratorIdsQuery = collaboratorsQueryBuilder.distinct('user_id').toQuery();
+    const collaboratorIds = await this.databaseRouter.queryDataPrismaForTable<
+      { user_id: string | null }[]
+    >(tableId, collaboratorIdsQuery);
+    const userIds = Array.from(
+      new Set(
+        collaboratorIds
+          .map(({ user_id }) => user_id)
+          .filter((userId): userId is string => Boolean(userId))
+      )
+    );
+
+    if (!userIds.length) {
+      return [];
+    }
+
+    const users = await this.prismaService.txClient().user.findMany({
+      where: {
+        id: { in: userIds },
+        ...(search
+          ? {
+              OR: [
+                { name: { contains: search, mode: 'insensitive' } },
+                { email: { contains: search, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      },
+      select: { id: true, email: true, name: true, avatar: true },
+      take: take ?? 50,
+      skip: skip ?? 0,
+    });
+
+    return users.map(({ id, email, name, avatar }) => ({
+      userId: id,
+      email,
+      userName: name,
+      avatar: avatar && getPublicFullStorageUrl(avatar),
+    }));
   }
 }

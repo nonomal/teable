@@ -32,7 +32,7 @@ import { useTranslation } from 'react-i18next';
 import { CopyButton } from './CopyButton';
 
 const getShareUrl = ({ shareId, theme }: { shareId: string; theme?: string }) => {
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://app.teable.io';
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://app.teable.ai';
   const url = new URL(`/share/${shareId}/view`, origin);
   if (theme && theme !== 'system') {
     url.searchParams.append('theme', theme);
@@ -52,11 +52,11 @@ export const SharePopover: React.FC<{
   const [showPasswordDialog, setShowPasswordDialog] = useState<boolean>();
   const [sharePassword, setSharePassword] = useState<string>('');
 
-  const { mutate: enableShareFn, isLoading: enableShareLoading } = useMutation({
+  const { mutate: enableShareFn, isPending: enableShareLoading } = useMutation({
     mutationFn: async (view: View) => view.apiEnableShare(),
   });
 
-  const { mutate: disableShareFn, isLoading: disableShareLoading } = useMutation({
+  const { mutate: disableShareFn, isPending: disableShareLoading } = useMutation({
     mutationFn: async (view: View) => view.disableShare(),
   });
 
@@ -80,9 +80,6 @@ export const SharePopover: React.FC<{
     }
     if (enableShare) {
       await enableShareFn(view);
-      setTimeout(() => {
-        !view?.shareMeta && setShareMeta({ submit: { requireLogin: false, allow: true } });
-      }, 100);
     } else {
       disableShareFn(view);
     }
@@ -108,9 +105,6 @@ export const SharePopover: React.FC<{
   };
 
   const onSubmitRequireLoginChange = (check: boolean) => {
-    if (!shareMeta?.submit) {
-      return;
-    }
     setShareMeta({ submit: { ...shareMeta?.submit, requireLogin: check } });
   };
 
@@ -121,7 +115,7 @@ export const SharePopover: React.FC<{
         <div className="flex items-center justify-between">
           <Label htmlFor="share-switch">{t('share.statusLabel')}</Label>
           <Switch
-            className="ml-auto"
+            className="ms-auto"
             id="share-switch"
             checked={enableShare}
             disabled={enableShareLoading || disableShareLoading || !permission['view|share']}
@@ -132,12 +126,12 @@ export const SharePopover: React.FC<{
         {enableShare ? (
           <>
             <div className="flex items-center gap-1">
-              <Input className="h-7 grow" id="share-link" value={shareUrl} readOnly />
+              <Input className="grow" size="sm" id="share-link" value={shareUrl} readOnly />
 
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button size="xs" variant="outline">
-                    <Qrcode />
+                  <Button size="icon-xs" variant="outline">
+                    <Qrcode className="size-4 shrink-0" />
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="size-48 bg-white p-2">
@@ -148,8 +142,13 @@ export const SharePopover: React.FC<{
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button size={'xs'} variant={'outline'} onClick={() => view.setRefreshLink()}>
-                      <RefreshCcw />
+                    <Button
+                      size={'icon-xs'}
+                      variant={'outline'}
+                      disabled={!permission['view|share']}
+                      onClick={() => view.setRefreshLink()}
+                    >
+                      <RefreshCcw className="size-4 shrink-0" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
@@ -164,6 +163,7 @@ export const SharePopover: React.FC<{
                 <Switch
                   id="share-password"
                   checked={Boolean(shareMeta?.password)}
+                  disabled={!permission['view|share']}
                   onCheckedChange={onPasswordSwitchChange}
                 />
                 <Label className="text-xs" htmlFor="share-password">
@@ -174,24 +174,24 @@ export const SharePopover: React.FC<{
                     className="h-5 py-0 hover:text-muted-foreground"
                     variant={'link'}
                     size={'xs'}
+                    disabled={!permission['view|share']}
                     onClick={() => setShowPasswordDialog(true)}
                   >
                     <Edit />
                   </Button>
                 )}
               </div>
-              {
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="share-required-login"
-                    checked={Boolean(shareMeta?.submit?.requireLogin)}
-                    onCheckedChange={onSubmitRequireLoginChange}
-                  />
-                  <Label className="text-xs" htmlFor="share-required-login">
-                    {t('share.requireLogin')}
-                  </Label>
-                </div>
-              }
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="share-required-login"
+                  checked={Boolean(shareMeta?.submit?.requireLogin)}
+                  disabled={!permission['view|share']}
+                  onCheckedChange={onSubmitRequireLoginChange}
+                />
+                <Label className="text-xs" htmlFor="share-required-login">
+                  {t('share.requireLogin')}
+                </Label>
+              </div>
             </div>
           </>
         ) : (
@@ -210,7 +210,6 @@ export const SharePopover: React.FC<{
               <DialogDescription>{t('share.passwordTips')}</DialogDescription>
             </DialogHeader>
             <Input
-              className="h-8"
               type="password"
               value={sharePassword}
               onChange={(e) => setSharePassword(e.target.value)}

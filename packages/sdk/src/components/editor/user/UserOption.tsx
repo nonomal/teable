@@ -1,6 +1,6 @@
 import { Avatar, AvatarFallback, AvatarImage, cn } from '@teable/ui-lib';
 import { useMemo, isValidElement } from 'react';
-import { convertNextImageUrl } from '../../grid-enhancements';
+import { useContentDir } from '../../../hooks/use-content-dir';
 
 interface IUserTagProps {
   className?: string;
@@ -11,24 +11,14 @@ interface IUserTagProps {
 
 export const UserOption = (props: IUserTagProps) => {
   const { className, name, email, avatar } = props;
+  const contentDir = useContentDir();
   const avatarCom = useMemo(() => {
     if (isValidElement(avatar)) {
       return avatar;
     }
     return (
       <>
-        <AvatarImage
-          src={
-            avatar
-              ? convertNextImageUrl({
-                  url: avatar as string,
-                  w: 64,
-                  q: 75,
-                })
-              : undefined
-          }
-          alt={name}
-        />
+        <AvatarImage src={(avatar as string) || undefined} alt={name} />
         <AvatarFallback className="text-sm">{name.slice(0, 1)}</AvatarFallback>
       </>
     );
@@ -38,7 +28,7 @@ export const UserOption = (props: IUserTagProps) => {
     <div className={cn('flex items-center gap-4', className)}>
       <Avatar className="box-content size-7 cursor-pointer border">{avatarCom}</Avatar>
       <div className="flex-1 truncate">
-        <p className="truncate text-sm font-medium leading-none" title={name}>
+        <p dir={contentDir} className="truncate text-sm font-medium leading-none" title={name}>
           {name}
         </p>
         {email && (

@@ -1,11 +1,11 @@
+import { Injectable, Logger } from '@nestjs/common';
+import type { ILocalization } from '@teable/core';
 import {
-  Injectable,
-  Logger,
-  ForbiddenException,
-  BadGatewayException,
-  BadRequestException,
-} from '@nestjs/common';
-import { generateCommentId, getCommentChannel, getTableCommentChannel } from '@teable/core';
+  generateCommentId,
+  getCommentChannel,
+  getTableCommentChannel,
+  HttpErrorCode,
+} from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import type {
   ICreateCommentRo,
@@ -15,12 +15,23 @@ import type {
   ICommentContent,
   IGetRecordsRo,
   IParagraphCommentContent,
+  ICommentReaction,
 } from '@teable/openapi';
-import { CommentNodeType, CommentPatchType } from '@teable/openapi';
-import { uniq, omit } from 'lodash';
+import { CommentNodeType, CommentPatchType, UploadType } from '@teable/openapi';
+import { uniq } from 'lodash';
 import { ClsService } from 'nestjs-cls';
+import { CacheService } from '../../cache/cache.service';
+import { CustomHttpException } from '../../custom.exception';
 import { ShareDbService } from '../../share-db/share-db.service';
 import type { IClsStore } from '../../types/cls';
+import type { I18nPath } from '../../types/i18n.generated';
+import { AttachmentsStorageService } from '../attachments/attachments-storage.service';
+import StorageAdapter from '../attachments/plugins/adapter';
+import {
+  getFreshPreviewCacheUrl,
+  getPreviewCacheKey,
+  getPublicFullStorageUrl,
+} from '../attachments/plugins/utils';
 import { NotificationService } from '../notification/notification.service';
 import { RecordService } from '../record/record.service';
 
@@ -32,15 +43,178 @@ export class CommentOpenApiService {
     private readonly recordService: RecordService,
     private readonly prismaService: PrismaService,
     private readonly cls: ClsService<IClsStore>,
-    private readonly shareDbService: ShareDbService
+    private readonly shareDbService: ShareDbService,
+    private readonly cacheService: CacheService,
+    private readonly attachmentsStorageService: AttachmentsStorageService
   ) {}
 
-  async getCommentDetail(commentId: string) {
-    const rawComment = await this.prismaService.comment.findFirst({
+  private async collectionsContext(comment: ICommentContent | null) {
+    if (!comment) {
+      return {
+        imagePaths: [],
+        mentionUserIds: [],
+      };
+    }
+    const imagePaths: string[] = [];
+    const mentionUserIds: string[] = [];
+    comment.forEach((item) => {
+      if (item.type === CommentNodeType.Img) {
+        return imagePaths.push(item.path);
+      }
+      if (item.type === CommentNodeType.Paragraph) {
+        return item.children.forEach((child) => {
+          if (child.type === CommentNodeType.Mention) {
+            return mentionUserIds.push(child.value);
+          }
+        });
+      }
+    });
+    return {
+      imagePaths,
+      mentionUserIds,
+    };
+  }
+
+  private async getUserInfoMap(userIds: string[]) {
+    const res = await this.prismaService.user.findMany({
       where: {
-        id: commentId,
-        deletedTime: null,
+        id: {
+          in: userIds,
+        },
       },
+      select: {
+        id: true,
+        name: true,
+        avatar: true,
+      },
+    });
+    return res.reduce(
+      (acc, user) => {
+        acc[user.id] = {
+          id: user.id,
+          name: user.name,
+          avatar: user.avatar ? getPublicFullStorageUrl(user.avatar) : undefined,
+        };
+        return acc;
+      },
+      {} as Record<string, { id: string; name: string; avatar: string | undefined }>
+    );
+  }
+
+  private async getPresignedUrlMap(paths: string[]) {
+    const bucket = StorageAdapter.getBucket(UploadType.Comment);
+    const tokens = paths.map((path) => path.split('/').pop());
+    let urls: string[] = [];
+    if (tokens.length) {
+      const cacheUrls = await this.cacheService.getMany(
+        tokens.map((token) => getPreviewCacheKey(token ?? ''))
+      );
+      urls = cacheUrls.map((cacheValue) => getFreshPreviewCacheUrl(cacheValue)) as string[];
+    }
+    const presignedUrls = await Promise.all(
+      urls.map(async (url, index) => {
+        if (!url) {
+          return this.attachmentsStorageService.getPreviewUrlByPath(
+            bucket,
+            paths[index],
+            tokens[index]!
+          );
+        }
+        return url;
+      })
+    );
+    return presignedUrls.reduce(
+      (acc, url, index) => {
+        acc[paths[index]] = url;
+        return acc;
+      },
+      {} as Record<string, string>
+    );
+  }
+
+  private async additionalContentContext(
+    comment: ICommentContent | null,
+    context: {
+      imagePathMap: Record<string, string>;
+      mentionUserMap: Record<string, { id: string; name: string; avatar: string | undefined }>;
+    }
+  ): Promise<ICommentContent | null> {
+    if (!comment) {
+      return null;
+    }
+    const { imagePathMap, mentionUserMap } = context;
+    return comment.map((item) => {
+      switch (item.type) {
+        case CommentNodeType.Img:
+          return {
+            ...item,
+            url: imagePathMap[item.path],
+          };
+        case CommentNodeType.Paragraph:
+          return {
+            ...item,
+            children: item.children.map((child) => {
+              if (child.type === CommentNodeType.Mention) {
+                return {
+                  ...child,
+                  name: mentionUserMap[child.value].name,
+                  avatar: mentionUserMap[child.value].avatar,
+                };
+              }
+              return child;
+            }),
+          };
+        default:
+          throw new CustomHttpException(
+            `Invalid comment content type: ${(item as IParagraphCommentContent)?.type}`,
+            HttpErrorCode.VALIDATION_ERROR,
+            {
+              localization: {
+                i18nKey: 'httpErrors.comment.invalidContentType',
+              },
+            }
+          );
+      }
+    });
+  }
+
+  private getCommentScopeWhere(tableId: string, recordId: string, commentId: string) {
+    return {
+      id: commentId,
+      tableId,
+      recordId,
+      deletedTime: null,
+    };
+  }
+
+  private throwCommentNotFound(): never {
+    throw new CustomHttpException('Comment not found', HttpErrorCode.NOT_FOUND);
+  }
+
+  private async validateQuoteId(tableId: string, recordId: string, quoteId?: string | null) {
+    if (!quoteId) {
+      return;
+    }
+
+    const quoteComment = await this.prismaService.comment.findFirst({
+      where: this.getCommentScopeWhere(tableId, recordId, quoteId),
+      select: {
+        id: true,
+      },
+    });
+
+    if (!quoteComment) {
+      this.throwCommentNotFound();
+    }
+  }
+
+  async getCommentDetail(
+    tableId: string,
+    recordId: string,
+    commentId: string
+  ): Promise<ICommentVo | null> {
+    const rawComment = await this.prismaService.comment.findFirst({
+      where: this.getCommentScopeWhere(tableId, recordId, commentId),
       select: {
         id: true,
         content: true,
@@ -56,12 +230,36 @@ export class CommentOpenApiService {
     if (!rawComment) {
       return null;
     }
+    const { reaction: rawReaction, content: rawContent, quoteId, ...rest } = rawComment;
+    const content = (rawContent ? JSON.parse(rawContent) : null) as ICommentContent;
+    const reaction = rawReaction ? (JSON.parse(rawReaction) as ICommentReaction) : [];
+    const { imagePaths, mentionUserIds } = await this.collectionsContext(content);
+    const imagePathMap = await this.getPresignedUrlMap(imagePaths);
+    const mentionUserMap = await this.getUserInfoMap(
+      Array.from(
+        new Set([...mentionUserIds, rawComment.createdBy, ...reaction.flatMap((item) => item.user)])
+      )
+    );
+    const commentContent = await this.additionalContentContext(content, {
+      imagePathMap,
+      mentionUserMap,
+    });
+
+    const fullReaction = reaction.map((item) => ({
+      reaction: item.reaction,
+      user: item.user.map((id) => mentionUserMap[id]).filter(Boolean),
+    }));
 
     return {
-      ...rawComment,
-      reaction: rawComment.reaction ? JSON.parse(rawComment?.reaction) : null,
-      content: rawComment?.content ? JSON.parse(rawComment?.content) : null,
-    } as ICommentVo;
+      ...rest,
+      quoteId: quoteId || undefined,
+      content: commentContent || [],
+      createdBy: mentionUserMap[rawComment.createdBy],
+      createdTime: rawComment.createdTime.toISOString(),
+      lastModifiedTime: rawComment.lastModifiedTime?.toISOString(),
+      deletedTime: rawComment.deletedTime?.toISOString(),
+      reaction: fullReaction.length ? fullReaction : null,
+    };
   }
 
   async getCommentList(
@@ -72,7 +270,15 @@ export class CommentOpenApiService {
     const { cursor, take = 20, direction = 'forward', includeCursor = true } = getCommentListQuery;
 
     if (take > 1000) {
-      throw new BadRequestException(`${take} exceed the max count comment list count 1000`);
+      throw new CustomHttpException(
+        `take ${take} exceed the max count comment list count 1000`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.comment.listCountExceeded',
+          },
+        }
+      );
     }
 
     const takeWithDirection = direction === 'forward' ? -(take + 1) : take + 1;
@@ -106,31 +312,92 @@ export class CommentOpenApiService {
         : rawComments.pop()?.id
       : null;
 
-    const parsedComments = rawComments
-      .sort((a, b) => a.createdTime.getTime() - b.createdTime.getTime())
-      .map(
-        (comment) =>
-          ({
-            ...comment,
-            content: comment.content ? JSON.parse(comment.content) : null,
-            reaction: comment.reaction ? JSON.parse(comment.reaction) : null,
-          }) as ICommentVo
-      );
+    const parsedComments = rawComments.map((comment) => ({
+      ...comment,
+      content: comment.content ? (JSON.parse(comment.content) as ICommentContent) : null,
+      reaction: comment.reaction ? (JSON.parse(comment.reaction) as ICommentReaction) : null,
+    }));
 
+    const imagePaths: Set<string> = new Set();
+    const mentionUserIds: Set<string> = new Set();
+
+    for (let i = 0; i < parsedComments.length; i++) {
+      const { content, reaction, createdBy } = parsedComments[i];
+      const context = await this.collectionsContext(content);
+      mentionUserIds.add(createdBy);
+      context.imagePaths.forEach((path) => imagePaths.add(path));
+      context.mentionUserIds.forEach((id) => mentionUserIds.add(id));
+      reaction?.forEach((item) => {
+        item.user.forEach((id) => mentionUserIds.add(id));
+      });
+    }
+    const imagePathMap = await this.getPresignedUrlMap(Array.from(imagePaths));
+    const mentionUserMap = await this.getUserInfoMap(Array.from(mentionUserIds));
+    const comments: ICommentVo[] = [];
+    for (let i = 0; i < parsedComments.length; i++) {
+      const { createdTime, lastModifiedTime, content, quoteId, reaction, ...rest } =
+        parsedComments[i];
+      const fullContent =
+        (await this.additionalContentContext(content, {
+          imagePathMap,
+          mentionUserMap,
+        })) || [];
+      const fullCreatedBy = mentionUserMap[parsedComments[i].createdBy];
+      comments.push({
+        ...rest,
+        reaction: reaction?.map((item) => ({
+          reaction: item.reaction,
+          user: item.user.map((id) => mentionUserMap[id]).filter(Boolean),
+        })),
+        quoteId: quoteId || undefined,
+        content: fullContent,
+        createdBy: fullCreatedBy,
+        lastModifiedTime: lastModifiedTime?.toISOString(),
+        createdTime: createdTime.toISOString(),
+      });
+    }
     return {
-      comments: parsedComments,
+      comments,
       nextCursor,
     };
   }
 
+  async filterCommentContent(content: ICommentContent) {
+    return content.map((item) => {
+      if (item.type === CommentNodeType.Img) {
+        const { url, ...rest } = item;
+        return rest;
+      }
+      if (item.type === CommentNodeType.Paragraph) {
+        const { children, ...rest } = item;
+        return {
+          ...rest,
+          children: children.map((child) => {
+            if (child.type === CommentNodeType.Mention) {
+              const { name, avatar, ...rest } = child;
+              return {
+                ...rest,
+              };
+            }
+            return child;
+          }),
+        };
+      }
+      return item;
+    });
+  }
+
   async createComment(tableId: string, recordId: string, createCommentRo: ICreateCommentRo) {
+    await this.validateQuoteId(tableId, recordId, createCommentRo.quoteId);
+
     const id = generateCommentId();
+    const content = await this.filterCommentContent(createCommentRo.content);
     const result = await this.prismaService.comment.create({
       data: {
         id,
         tableId,
         recordId,
-        content: JSON.stringify(createCommentRo.content),
+        content: JSON.stringify(content),
         createdBy: this.cls.get('user.id'),
         quoteId: createCommentRo.quoteId,
         lastModifiedTime: null,
@@ -157,20 +424,33 @@ export class CommentOpenApiService {
     commentId: string,
     updateCommentRo: IUpdateCommentRo
   ) {
-    const result = await this.prismaService.comment
-      .update({
-        where: {
-          id: commentId,
-          createdBy: this.cls.get('user.id'),
-        },
-        data: {
-          content: JSON.stringify(updateCommentRo.content),
-          lastModifiedTime: new Date().toISOString(),
-        },
-      })
-      .catch(() => {
-        throw new ForbiddenException('You have no permission to delete this comment');
-      });
+    const updateResult = await this.prismaService.comment.updateMany({
+      where: {
+        ...this.getCommentScopeWhere(tableId, recordId, commentId),
+        createdBy: this.cls.get('user.id'),
+      },
+      data: {
+        content: JSON.stringify(updateCommentRo.content),
+        lastModifiedTime: new Date().toISOString(),
+      },
+    });
+
+    if (!updateResult.count) {
+      this.throwCommentNotFound();
+    }
+
+    const result = await this.prismaService.comment.findFirst({
+      where: this.getCommentScopeWhere(tableId, recordId, commentId),
+      select: {
+        id: true,
+        quoteId: true,
+        content: true,
+      },
+    });
+
+    if (!result) {
+      this.throwCommentNotFound();
+    }
 
     this.sendCommentPatch(tableId, recordId, CommentPatchType.UpdateComment, result);
     await this.sendCommentNotify(tableId, recordId, commentId, {
@@ -180,21 +460,21 @@ export class CommentOpenApiService {
   }
 
   async deleteComment(tableId: string, recordId: string, commentId: string) {
-    await this.prismaService.comment
-      .update({
-        where: {
-          id: commentId,
-          createdBy: this.cls.get('user.id'),
-        },
-        data: {
-          deletedTime: new Date().toISOString(),
-        },
-      })
-      .catch(() => {
-        throw new ForbiddenException('You have no permission to delete this comment');
-      });
+    const result = await this.prismaService.comment.updateMany({
+      where: {
+        ...this.getCommentScopeWhere(tableId, recordId, commentId),
+        createdBy: this.cls.get('user.id'),
+      },
+      data: {
+        deletedTime: new Date().toISOString(),
+      },
+    });
 
-    this.sendCommentPatch(tableId, recordId, CommentPatchType.CreateReaction, { id: commentId });
+    if (!result.count) {
+      this.throwCommentNotFound();
+    }
+
+    this.sendCommentPatch(tableId, recordId, CommentPatchType.DeleteComment, { id: commentId });
     this.sendTableCommentPatch(tableId, recordId, CommentPatchType.DeleteComment);
   }
 
@@ -204,12 +484,16 @@ export class CommentOpenApiService {
     commentId: string,
     reactionRo: { reaction: string }
   ) {
-    const commentRaw = await this.getCommentReactionById(commentId);
-    const { reaction } = reactionRo;
-    let data: ICommentVo['reaction'] = [];
+    const commentRaw = await this.getCommentReactionById(tableId, recordId, commentId);
+    if (!commentRaw) {
+      this.throwCommentNotFound();
+    }
 
-    if (commentRaw && commentRaw.reaction) {
-      const emojis = JSON.parse(commentRaw.reaction) as NonNullable<ICommentVo['reaction']>;
+    const { reaction } = reactionRo;
+    let data: ICommentReaction = [];
+
+    if (commentRaw.reaction) {
+      const emojis = JSON.parse(commentRaw.reaction) as NonNullable<ICommentReaction>;
       const index = emojis.findIndex((item) => item.reaction === reaction);
       if (index > -1) {
         const newUser = emojis[index].user.filter((item) => item !== this.cls.get('user.id'));
@@ -225,21 +509,19 @@ export class CommentOpenApiService {
       }
     }
 
-    const result = await this.prismaService.comment
-      .update({
-        where: {
-          id: commentId,
-        },
-        data: {
-          reaction: data.length ? JSON.stringify(data) : null,
-          lastModifiedTime: commentRaw?.lastModifiedTime,
-        },
-      })
-      .catch((e) => {
-        throw new BadGatewayException(e);
-      });
+    const result = await this.prismaService.comment.updateMany({
+      where: this.getCommentScopeWhere(tableId, recordId, commentId),
+      data: {
+        reaction: data.length ? JSON.stringify(data) : null,
+        lastModifiedTime: commentRaw.lastModifiedTime,
+      },
+    });
 
-    this.sendCommentPatch(tableId, recordId, CommentPatchType.DeleteReaction, result);
+    if (!result.count) {
+      this.throwCommentNotFound();
+    }
+
+    this.sendCommentPatch(tableId, recordId, CommentPatchType.DeleteReaction, { id: commentId });
   }
 
   async createCommentReaction(
@@ -248,11 +530,15 @@ export class CommentOpenApiService {
     commentId: string,
     reactionRo: { reaction: string }
   ) {
-    const commentRaw = await this.getCommentReactionById(commentId);
+    const commentRaw = await this.getCommentReactionById(tableId, recordId, commentId);
+    if (!commentRaw) {
+      this.throwCommentNotFound();
+    }
+
     const { reaction } = reactionRo;
     let data: ICommentVo['reaction'];
 
-    if (commentRaw && commentRaw.reaction) {
+    if (commentRaw.reaction) {
       const emojis = JSON.parse(commentRaw.reaction) as NonNullable<ICommentVo['reaction']>;
       const index = emojis.findIndex((item) => item.reaction === reaction);
       if (index > -1) {
@@ -276,46 +562,42 @@ export class CommentOpenApiService {
       ];
     }
 
-    const result = await this.prismaService.comment
-      .update({
-        where: {
-          id: commentId,
-        },
-        data: {
-          reaction: JSON.stringify(data),
-          lastModifiedTime: commentRaw?.lastModifiedTime,
-        },
-      })
-      .catch((e) => {
-        throw new BadGatewayException(e);
-      });
+    const result = await this.prismaService.comment.updateMany({
+      where: this.getCommentScopeWhere(tableId, recordId, commentId),
+      data: {
+        reaction: JSON.stringify(data),
+        lastModifiedTime: commentRaw.lastModifiedTime,
+      },
+    });
 
-    await this.sendCommentPatch(tableId, recordId, CommentPatchType.CreateReaction, result);
+    if (!result.count) {
+      this.throwCommentNotFound();
+    }
+
+    await this.sendCommentPatch(tableId, recordId, CommentPatchType.CreateReaction, {
+      id: commentId,
+    });
     await this.sendCommentNotify(tableId, recordId, commentId, {
-      quoteId: result.quoteId,
-      content: result.content,
+      quoteId: commentRaw.quoteId,
+      content: commentRaw.content,
     });
   }
 
   async getSubscribeDetail(tableId: string, recordId: string) {
-    return await this.prismaService.commentSubscription
-      .findUniqueOrThrow({
-        where: {
-          // eslint-disable-next-line
-          tableId_recordId: {
-            tableId,
-            recordId,
-          },
+    return this.prismaService.commentSubscription.findUnique({
+      where: {
+        // eslint-disable-next-line
+        tableId_recordId: {
+          tableId,
+          recordId,
         },
-        select: {
-          tableId: true,
-          recordId: true,
-          createdBy: true,
-        },
-      })
-      .catch(() => {
-        return null;
-      });
+      },
+      select: {
+        tableId: true,
+        recordId: true,
+        createdBy: true,
+      },
+    });
   }
 
   async subscribeComment(tableId: string, recordId: string) {
@@ -341,7 +623,7 @@ export class CommentOpenApiService {
   }
 
   async getTableCommentCount(tableId: string, query: IGetRecordsRo) {
-    const docResult = await this.recordService.getDocIdsByQuery(tableId, query);
+    const docResult = await this.recordService.getDocIdsByQuery(tableId, query, true);
     const recordsId = docResult.ids;
 
     const result = await this.prismaService.comment.groupBy({
@@ -350,6 +632,7 @@ export class CommentOpenApiService {
         recordId: {
           in: recordsId,
         },
+        tableId,
         deletedTime: null,
       },
       _count: {
@@ -377,14 +660,14 @@ export class CommentOpenApiService {
     };
   }
 
-  private async getCommentReactionById(commentId: string) {
+  private async getCommentReactionById(tableId: string, recordId: string, commentId: string) {
     return await this.prismaService.comment.findFirst({
-      where: {
-        id: commentId,
-      },
+      where: this.getCommentScopeWhere(tableId, recordId, commentId),
       select: {
         reaction: true,
         lastModifiedTime: true,
+        quoteId: true,
+        content: true,
       },
     });
   }
@@ -401,10 +684,8 @@ export class CommentOpenApiService {
 
     if (quoteId) {
       const { createdBy: quoteCommentCreator } =
-        (await this.prismaService.comment.findUnique({
-          where: {
-            id: quoteId,
-          },
+        (await this.prismaService.comment.findFirst({
+          where: this.getCommentScopeWhere(tableId, recordId, quoteId),
           select: {
             createdBy: true,
           },
@@ -444,15 +725,14 @@ export class CommentOpenApiService {
       return;
     }
 
-    const { name: baseName } =
-      (await this.prismaService.base.findFirst({
-        where: {
-          id: baseId,
-        },
-        select: {
-          name: true,
-        },
-      })) || {};
+    const { name: baseName } = await this.prismaService.base.findUniqueOrThrow({
+      where: {
+        id: baseId,
+      },
+      select: {
+        name: true,
+      },
+    });
 
     const recordName = await this.recordService.getCellValue(tableId, recordId, fieldId);
 
@@ -470,7 +750,10 @@ export class CommentOpenApiService {
       new Set([...notifyUsers.map(({ createdBy }) => createdBy), ...relativeUsers])
     ).filter((userId) => userId !== fromUserId);
 
-    const message = `${fromUserName} made a commented on ${recordName ? recordName : 'a record'} in ${tableName} ${baseName ? `in ${baseName}` : ''}`;
+    const message: ILocalization<I18nPath> = {
+      i18nKey: 'common.email.templates.notify.recordComment.message',
+      context: { fromUserName, recordName: recordName ?? '', tableName, baseName },
+    };
 
     subscribeUsersIds.forEach((userId) => {
       this.notificationService.sendCommentNotify({
@@ -508,15 +791,15 @@ export class CommentOpenApiService {
     return presence.create(channel);
   }
 
-  private sendCommentPatch(
+  private async sendCommentPatch(
     tableId: string,
     recordId: string,
     type: CommentPatchType,
     data: Record<string, unknown>
   ) {
     const localPresence = this.createCommentPresence(tableId, recordId);
-
-    let finalData = omit(data, ['tableId', 'recordId']);
+    const commentId = data.id as string;
+    let finalData: ICommentVo | null | { id: string } = null;
 
     if (
       [
@@ -526,11 +809,13 @@ export class CommentOpenApiService {
         CommentPatchType.DeleteReaction,
       ].includes(type)
     ) {
-      const { content, reaction } = finalData;
+      finalData = await this.getCommentDetail(tableId, recordId, commentId);
+    }
+
+    if (type === CommentPatchType.DeleteComment) {
       finalData = {
         ...finalData,
-        content: content ? JSON.parse(content as string) : content,
-        reaction: reaction ? JSON.parse(reaction as string) : reaction,
+        id: commentId,
       };
     }
 

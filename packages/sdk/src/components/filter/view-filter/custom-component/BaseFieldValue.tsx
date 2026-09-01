@@ -1,9 +1,36 @@
-import type { IDateFilter, IFilterItem } from '@teable/core';
-import { CellValueType, FieldType } from '@teable/core';
-import { useMemo } from 'react';
+import {
+  assertNever,
+  CellValueType,
+  FieldType,
+  isFieldReferenceValue,
+  isFieldReferenceOperatorSupported,
+  isFieldReferenceComparable,
+  exactDate,
+  exactFormatDate,
+} from '@teable/core';
+import type {
+  IDateFilter,
+  IFilterItem,
+  IFieldReferenceValue,
+  INumberFormatting,
+  IOperator,
+} from '@teable/core';
+import { Switch } from '@teable/icons';
+import {
+  Button,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+  cn,
+} from '@teable/ui-lib';
+import { cloneElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactElement } from 'react';
 import { useTranslation } from '../../../../context/app/i18n';
 import type { DateField, IFieldInstance } from '../../../../model';
+import { useInDrawer } from '../../../adaptive-panel';
 import { NumberEditor, RatingEditor } from '../../../editor';
+import { FieldSelector } from '../../../field';
 import {
   FileTypeSelect,
   FilterCheckbox,
@@ -18,6 +45,11 @@ import type { ILinkContext } from '../component/filter-link/context';
 import { EMPTY_OPERATORS, ARRAY_OPERATORS } from '../constant';
 import type { IFilterComponents } from '../types';
 
+export interface IFilterReferenceSource {
+  fields: IFieldInstance[];
+  tableId?: string;
+}
+
 interface IBaseFieldValue {
   value: unknown;
   operator: IFilterItem['operator'];
@@ -25,10 +57,260 @@ interface IBaseFieldValue {
   field?: IFieldInstance;
   components?: IFilterComponents;
   linkContext?: ILinkContext;
+  modal?: boolean;
+  referenceSource?: IFilterReferenceSource;
 }
 
+interface IConditionalRollupValueProps {
+  literalComponent: JSX.Element;
+  value: unknown;
+  onSelect: (value: IFilterItem['value']) => void;
+  operator: IFilterItem['operator'];
+  referenceSource?: IFilterReferenceSource;
+  modal?: boolean;
+  field?: IFieldInstance;
+}
+
+/**
+ * NumberEditor only displays runtime numbers. AutoNumber filters used to be
+ * stored as strings by FilterInput; coerce finite numeric strings so a saved
+ * value such as "50" still renders.
+ */
+const toNumberEditorValue = (value: unknown): number | null | undefined => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  if (value == null) {
+    return value as null | undefined;
+  }
+  return undefined;
+};
+
+const ConditionalRollupValue = (props: IConditionalRollupValueProps) => {
+  const inDrawer = useInDrawer();
+  const { literalComponent, value, onSelect, operator, referenceSource, modal, field } = props;
+  const { t } = useTranslation();
+  const referenceFields = referenceSource?.fields ?? [];
+  const referenceTableId = referenceSource?.tableId ?? referenceFields[0]?.tableId;
+  const isFieldMode = isFieldReferenceValue(value);
+  const [lastLiteralValue, setLastLiteralValue] = useState<IFilterItem['value'] | null>(
+    isFieldMode ? null : (value as IFilterItem['value'])
+  );
+  const [literalModeHint, setLiteralModeHint] = useState<IDateFilter['mode'] | null>(null);
+
+  const handleLiteralModeChange = useCallback((mode: IDateFilter['mode'] | null) => {
+    setLiteralModeHint(mode ?? null);
+  }, []);
+
+  useEffect(() => {
+    if (!isFieldReferenceValue(value)) {
+      setLastLiteralValue(value as IFilterItem['value']);
+    }
+  }, [value]);
+
+  const operatorSupportsReferences = useMemo(() => {
+    if (!field || !operator) {
+      return false;
+    }
+    return isFieldReferenceOperatorSupported(field, operator as IOperator);
+  }, [field, operator]);
+
+  const isReferenceFieldDisabled = useCallback(
+    (candidate: IFieldInstance) => {
+      if (!field) {
+        return false;
+      }
+      return !isFieldReferenceComparable(field, candidate);
+    },
+    [field]
+  );
+
+  const toggleDisabled = !operatorSupportsReferences || !referenceFields.length;
+  const lastDefaultKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!referenceFields.length || !field || !operator || !operatorSupportsReferences) {
+      return;
+    }
+
+    const currentKey = `${field.id}:${operator}`;
+    if (value !== undefined) {
+      lastDefaultKeyRef.current = currentKey;
+      return;
+    }
+
+    if (lastDefaultKeyRef.current === currentKey) {
+      return;
+    }
+
+    const comparableField = referenceFields.find(
+      (candidate) => !isReferenceFieldDisabled(candidate)
+    );
+    const targetField = comparableField ?? referenceFields[0];
+    if (!targetField) {
+      return;
+    }
+
+    lastDefaultKeyRef.current = currentKey;
+    onSelect({
+      type: 'field',
+      fieldId: targetField.id,
+      tableId: targetField.tableId ?? referenceTableId,
+    } satisfies IFieldReferenceValue);
+  }, [
+    field,
+    isReferenceFieldDisabled,
+    onSelect,
+    operator,
+    operatorSupportsReferences,
+    referenceFields,
+    referenceTableId,
+    value,
+  ]);
+
+  const handleToggle = () => {
+    if (toggleDisabled) {
+      return;
+    }
+    if (isFieldReferenceValue(value)) {
+      onSelect(lastLiteralValue ?? null);
+      return;
+    }
+    const comparableField = referenceFields.find(
+      (candidate) => !isReferenceFieldDisabled(candidate)
+    );
+    const targetField = comparableField ?? referenceFields[0];
+    if (!targetField) {
+      return;
+    }
+    onSelect({
+      type: 'field',
+      fieldId: targetField.id,
+      tableId: targetField.tableId ?? referenceTableId,
+    } satisfies IFieldReferenceValue);
+  };
+
+  const handleFieldSelect = (fieldId: string) => {
+    if (!fieldId) return;
+    onSelect({
+      type: 'field',
+      fieldId,
+      tableId: referenceTableId,
+    } satisfies IFieldReferenceValue);
+  };
+
+  const fieldModeTooltip = t('filter.conditionalRollup.switchToValue');
+  const literalModeTooltip = t('filter.conditionalRollup.switchToField');
+  const tooltipLabel = isFieldReferenceValue(value) ? fieldModeTooltip : literalModeTooltip;
+
+  const literalCandidate = isFieldReferenceValue(value) ? lastLiteralValue : value;
+
+  useEffect(() => {
+    if (isFieldReferenceValue(value)) {
+      return;
+    }
+    if (literalCandidate && typeof literalCandidate === 'object' && 'mode' in literalCandidate) {
+      setLiteralModeHint((literalCandidate as IDateFilter).mode ?? null);
+    }
+  }, [literalCandidate, value]);
+
+  const shouldHideToggle = useMemo(() => {
+    if (isFieldReferenceValue(value)) {
+      return false;
+    }
+    if (!field || field.cellValueType !== CellValueType.DateTime) {
+      return false;
+    }
+    if (!literalModeHint) {
+      return false;
+    }
+    return [exactDate.value, exactFormatDate.value].includes(
+      literalModeHint as 'exactDate' | 'exactFormatDate'
+    );
+  }, [field, literalModeHint, value]);
+
+  const mergedLiteralComponent = useMemo(() => {
+    const element = literalComponent as ReactElement<{
+      className?: string;
+      onModeChange?: unknown;
+    }>;
+    const existingModeChange = (
+      element.props as {
+        onModeChange?: (mode: IDateFilter['mode'] | null) => void;
+      }
+    ).onModeChange;
+    return cloneElement(element, {
+      className: cn(
+        element.props.className,
+        '!h-9 min-w-[8rem] w-full',
+        shouldHideToggle ? null : 'rounded-e-none border-e-0'
+      ),
+      onModeChange: (mode: IDateFilter['mode'] | null) => {
+        handleLiteralModeChange(mode);
+        existingModeChange?.(mode);
+      },
+    });
+  }, [handleLiteralModeChange, literalComponent, shouldHideToggle]);
+
+  if (shouldHideToggle) {
+    return mergedLiteralComponent;
+  }
+
+  return (
+    <div className="flex items-stretch">
+      {isFieldReferenceValue(value) ? (
+        <FieldSelector
+          fields={referenceFields}
+          value={value.fieldId}
+          onSelect={handleFieldSelect}
+          modal={modal}
+          className={cn('!h-9 w-40 rounded-e-none border-e-0', inDrawer && 'w-full')}
+          showTableName={Boolean(referenceTableId)}
+          tableId={referenceTableId}
+          isOptionDisabled={isReferenceFieldDisabled}
+        />
+      ) : (
+        mergedLiteralComponent
+      )}
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="outline"
+              size="icon"
+              className="-ms-px size-9 shrink-0 rounded-s-none border-input"
+              onClick={handleToggle}
+              disabled={toggleDisabled}
+              aria-label={tooltipLabel}
+            >
+              <Switch className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          {!toggleDisabled ? (
+            <TooltipContent>
+              <span>{tooltipLabel}</span>
+            </TooltipContent>
+          ) : null}
+        </Tooltip>
+      </TooltipProvider>
+    </div>
+  );
+};
+
 export function BaseFieldValue(props: IBaseFieldValue) {
-  const { onSelect, components, field, operator, value, linkContext } = props;
+  const inDrawer = useInDrawer();
+  // Precomputed once: the editors below are laid out by a wrapper that already
+  // decided how wide the row is, so inside a drawer they simply fill it.
+  const drawerWidth = inDrawer ? 'w-full' : undefined;
+  const drawerSelectWidth = inDrawer ? 'w-full min-w-0 max-w-none' : undefined;
+  const { onSelect, components, field, operator, value, linkContext, modal, referenceSource } =
+    props;
   const { t } = useTranslation();
 
   const showEmptyComponent = useMemo(() => {
@@ -46,62 +328,134 @@ export function BaseFieldValue(props: IBaseFieldValue) {
       placeholder={t('filter.default.placeholder')}
       value={value as string}
       onChange={onSelect}
-      className="min-w-28 max-w-40"
+      className={cn('w-40', drawerWidth)}
     />
   );
 
+  const getFormulaValueComponent = (cType: CellValueType) => {
+    switch (cType) {
+      case CellValueType.Boolean:
+        return <FilterCheckbox value={value as boolean} onChange={onSelect} className="w-10" />;
+      case CellValueType.DateTime:
+        return (
+          <FilterDatePicker
+            field={field as unknown as DateField}
+            value={value as IDateFilter}
+            onSelect={onSelect}
+            operator={operator}
+            // The plain Date branch forwards this; the formula-date branch
+            // used to drop it, leaving a non-modal calendar inside a modal
+            // container.
+            modal={modal}
+          />
+        );
+      case CellValueType.Number:
+        return (
+          <NumberEditor
+            value={toNumberEditorValue(value)}
+            saveOnChange={true}
+            onChange={onSelect as (value?: number | null) => void}
+            className={cn('w-40 placeholder:text-xs', drawerWidth)}
+            placeholder={t('filter.default.placeholder')}
+            formatting={(field?.options as { formatting?: INumberFormatting })?.formatting}
+          />
+        );
+      case CellValueType.String:
+        return InputComponent;
+      default:
+        assertNever(cType);
+    }
+  };
+
+  const wrapWithReference = (component: JSX.Element) => {
+    if (
+      !referenceSource?.fields?.length ||
+      !field ||
+      !operator ||
+      !isFieldReferenceOperatorSupported(field, operator as IOperator)
+    ) {
+      return component;
+    }
+    return (
+      <ConditionalRollupValue
+        literalComponent={component}
+        value={value}
+        onSelect={onSelect}
+        operator={operator}
+        referenceSource={referenceSource}
+        modal={modal}
+        field={field}
+      />
+    );
+  };
+
   switch (field?.type) {
     case FieldType.Number:
-      return (
+    case FieldType.AutoNumber:
+      return wrapWithReference(
         <NumberEditor
-          value={value as number}
+          value={toNumberEditorValue(value)}
+          saveOnChange={true}
           onChange={onSelect as (value?: number | null) => void}
-          className="min-w-28 max-w-40 placeholder:text-xs"
+          className={cn('w-40 placeholder:text-sm', drawerWidth)}
           placeholder={t('filter.default.placeholder')}
+          formatting={(field.options as { formatting?: INumberFormatting })?.formatting}
         />
       );
     case FieldType.SingleSelect:
-      return ARRAY_OPERATORS.includes(operator) ? (
-        <FilterMultipleSelect
-          field={field}
-          value={value as string[]}
-          onSelect={(value) => onSelect(value as IFilterItem['value'])}
-          className="min-w-28 max-w-64"
-          popoverClassName="max-w-64 min-w-28"
-        />
-      ) : (
-        <FilterSingleSelect
-          field={field}
-          value={value as string}
-          onSelect={onSelect}
-          operator={operator}
-          className="min-w-28 max-w-64"
-          popoverClassName="max-w-64 min-w-28"
-        />
+      return wrapWithReference(
+        ARRAY_OPERATORS.includes(operator) || field?.isMultipleCellValue ? (
+          <FilterMultipleSelect
+            field={field}
+            modal={modal}
+            value={value as string[]}
+            onSelect={(newValue) => onSelect(newValue as IFilterItem['value'])}
+            className={cn('h-8 min-w-40 max-w-64', drawerSelectWidth)}
+            popoverClassName="min-w-40 max-w-64"
+          />
+        ) : (
+          <FilterSingleSelect
+            field={field}
+            modal={modal}
+            value={value as string}
+            onSelect={onSelect}
+            operator={operator}
+            className={cn('h-8 min-w-40 max-w-64', drawerSelectWidth)}
+            popoverClassName="min-w-40 max-w-64"
+          />
+        )
       );
     case FieldType.MultipleSelect:
-      return (
+      return wrapWithReference(
         <FilterMultipleSelect
           field={field}
+          modal={modal}
           value={value as string[]}
-          onSelect={(value) => onSelect(value as IFilterItem['value'])}
-          className="min-w-28 max-w-64"
-          popoverClassName="min-w-28 max-w-64"
+          onSelect={(newValue) => onSelect(newValue as IFilterItem['value'])}
+          className={cn('h-8 min-w-40 max-w-64', drawerSelectWidth)}
+          popoverClassName="min-w-40 max-w-64"
         />
       );
     case FieldType.Date:
     case FieldType.CreatedTime:
     case FieldType.LastModifiedTime:
-      return (
+      return wrapWithReference(
         <FilterDatePicker
           field={field as DateField}
           value={value as IDateFilter}
           onSelect={onSelect}
           operator={operator}
+          modal={modal}
         />
       );
     case FieldType.Checkbox:
-      return <FilterCheckbox value={value as boolean} onChange={onSelect} className="w-10" />;
+      return wrapWithReference(
+        <FilterCheckbox
+          value={value as boolean}
+          onChange={onSelect}
+          className={cn('w-40', drawerWidth)}
+        />
+      );
     case FieldType.Link: {
       const linkProps = {
         field,
@@ -113,20 +467,20 @@ export function BaseFieldValue(props: IBaseFieldValue) {
       };
       if (components && components[FieldType.Link]) {
         const LinkComponents = components[FieldType.Link];
-        return <LinkComponents {...linkProps} />;
+        return wrapWithReference(<LinkComponents {...linkProps} />);
       }
-      return <FilterLink {...linkProps} />;
+      return wrapWithReference(<FilterLink {...linkProps} modal={modal} />);
     }
     case FieldType.Attachment:
       return <FileTypeSelect value={value as string} onSelect={onSelect} />;
     case FieldType.Rating:
-      return (
+      return wrapWithReference(
         <RatingEditor
           value={value as number}
           options={field.options}
           onChange={onSelect as (value?: number) => void}
-          className="h-8 rounded-md border border-input px-2 shadow-sm"
-          iconClassName="w-4 h-4 mr-1"
+          className={cn('h-8 w-40 rounded-md border px-2', drawerWidth)}
+          iconClassName="w-4 h-4 me-1"
         />
       );
     case FieldType.User:
@@ -141,17 +495,16 @@ export function BaseFieldValue(props: IBaseFieldValue) {
       };
       if (components && components[FieldType.User]) {
         const UserComponents = components[FieldType.User];
-        return <UserComponents {...props} />;
+        return wrapWithReference(<UserComponents {...props} />);
       }
-      return <FilterUserSelect {...props} />;
+      return wrapWithReference(<FilterUserSelect {...props} modal={modal} />);
     }
-    case FieldType.Formula: {
-      if (field.cellValueType === CellValueType.Boolean) {
-        return <FilterCheckbox value={value as boolean} onChange={onSelect} className="w-10" />;
-      }
-      return InputComponent;
-    }
+    case FieldType.Rollup:
+    case FieldType.Formula:
+      return wrapWithReference(getFormulaValueComponent(field.cellValueType));
+    case FieldType.ConditionalRollup:
+      return wrapWithReference(getFormulaValueComponent(field.cellValueType));
     default:
-      return InputComponent;
+      return wrapWithReference(InputComponent);
   }
 }

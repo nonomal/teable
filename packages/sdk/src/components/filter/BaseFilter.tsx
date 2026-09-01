@@ -1,10 +1,13 @@
-import { Plus } from '@teable/icons';
+import type { IConjunction } from '@teable/core';
+import { Plus, ListPlus } from '@teable/icons';
 import { Button, cn } from '@teable/ui-lib';
 import { produce } from 'immer';
 import { set, get } from 'lodash';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from '../../context/app/i18n';
+import { useInDrawer } from '../adaptive-panel';
 import { Condition } from './condition';
+import { ConjunctionSelect } from './condition/ConjunctionSelect';
 import { BaseFilterContext } from './context';
 import { useControllableState } from './hooks';
 import type {
@@ -41,6 +44,7 @@ const DEFAULT_VALUE = {
 
 export const BaseFilter = <T extends IConditionItemProperty>(props: IBaseFilterProps<T>) => {
   const { t } = useTranslation();
+  const inDrawer = useInDrawer();
   const {
     onChange,
     maxDepth = 2,
@@ -64,10 +68,12 @@ export const BaseFilter = <T extends IConditionItemProperty>(props: IBaseFilterP
     () =>
       defaultGroupValueFromProps || {
         conjunction: 'and',
-        children: [],
+        children: defaultItemValue ? [{ ...defaultItemValue }] : [],
       },
-    [defaultGroupValueFromProps]
+    [defaultGroupValueFromProps, defaultItemValue]
   );
+
+  const filterContainerRef = useRef<HTMLDivElement>(null);
 
   const createCondition = useCallback(
     (path: IFilterPath, type: 'item' | 'group') => {
@@ -108,12 +114,49 @@ export const BaseFilter = <T extends IConditionItemProperty>(props: IBaseFilterP
     [setValue, value]
   );
 
+  const onConjunctionChange = useCallback(
+    (val: IConjunction | null) => {
+      if (val && value) {
+        setValue({
+          ...value,
+          conjunction: val,
+        });
+      }
+    },
+    [setValue, value]
+  );
+
   const footer = (
-    <div className={cn('flex justify-start gap-1', footerClassName)}>
+    <div
+      role="button"
+      tabIndex={-1}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.stopPropagation();
+          e.preventDefault();
+        }
+      }}
+      className={cn(
+        'flex justify-start gap-2',
+        inDrawer &&
+          'mt-2 shrink-0 gap-4 [&>button]:min-w-0 [&>button]:flex-1 [&>button>span]:truncate',
+        footerClassName
+      )}
+      onClick={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        setTimeout(() => {
+          filterContainerRef?.current?.scrollTo({
+            top: filterContainerRef?.current?.scrollHeight,
+            behavior: 'smooth',
+          });
+        }, 0);
+      }}
+    >
       <Button
-        variant="ghost"
-        size="xs"
-        onClick={() =>
+        variant="outline"
+        size="sm"
+        onClick={() => {
           setValue({
             conjunction: valueProp.conjunction,
             children: [
@@ -122,15 +165,15 @@ export const BaseFilter = <T extends IConditionItemProperty>(props: IBaseFilterP
                 ? { ...defaultItemValue }
                 : ({ field: null, operator: null, value: null } as T),
             ],
-          })
-        }
+          });
+        }}
       >
-        <Plus />
-        {t('filter.addCondition')}
+        <Plus className="size-4" />
+        <span className="truncate">{t('filter.addCondition')}</span>
       </Button>
       <Button
-        variant="ghost"
-        size="xs"
+        variant="outline"
+        size="sm"
         onClick={() => {
           setValue({
             conjunction: valueProp.conjunction,
@@ -138,8 +181,8 @@ export const BaseFilter = <T extends IConditionItemProperty>(props: IBaseFilterP
           });
         }}
       >
-        <Plus />
-        {t('filter.addConditionGroup')}
+        <ListPlus className="size-4" />
+        <span className="truncate">{t('filter.addConditionGroup')}</span>
       </Button>
     </div>
   );
@@ -155,22 +198,38 @@ export const BaseFilter = <T extends IConditionItemProperty>(props: IBaseFilterP
         component: props.components,
       }}
     >
-      {children.length > 0 && (
-        <div className={cn('flex flex-1 flex-col overflow-auto', contentClassName)}>
-          {children.map((condition, index) => (
-            <Condition
-              key={index}
-              index={index}
-              value={condition}
-              path={['children', index]}
-              depth={0}
-              conjunction={conjunction}
-            />
-          ))}
-        </div>
-      )}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+        {children.length > 0 && (
+          <div
+            className={cn(
+              'flex flex-1 gap-2 flex-col overflow-auto pe-4 pb-2',
+              inDrawer && 'min-w-0 gap-4 overflow-x-hidden pe-2',
+              contentClassName
+            )}
+            ref={filterContainerRef}
+          >
+            <ConjunctionSelect value={conjunction} onSelect={onConjunctionChange} />
+            {children.map((condition, index) => (
+              <Condition
+                key={index}
+                index={index}
+                value={condition}
+                path={['children', index]}
+                depth={0}
+                conjunction={conjunction}
+              />
+            ))}
+          </div>
+        )}
 
-      {footer}
+        {children.length === 0 && (
+          <div className="text-sm font-normal text-muted-foreground">
+            {t('filter.default.empty')}
+          </div>
+        )}
+
+        {footer}
+      </div>
     </BaseFilterContext.Provider>
   );
 };

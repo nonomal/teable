@@ -4,10 +4,11 @@ import { useTranslation } from '../../context/app/i18n';
 interface IRecordItemProps {
   title?: string;
   active?: boolean;
+  className?: string;
 }
 
 export const RecordItem = (props: IRecordItemProps) => {
-  const { active, title } = props;
+  const { active, title, className } = props;
   const { t } = useTranslation();
 
   return (
@@ -17,8 +18,9 @@ export const RecordItem = (props: IRecordItemProps) => {
       className={cn(
         'group relative w-full cursor-pointer truncate rounded-md border border-input px-4 py-2 shadow-sm',
         {
-          'border-l-8 border-l-foreground': active,
-        }
+          'border-s-8 border-s-foreground': active,
+        },
+        className
       )}
     >
       <div

@@ -16,10 +16,59 @@ export function createEventPromise(eventEmitterService: EventEmitterService, eve
 }
 
 export function createAwaitWithEvent(eventEmitterService: EventEmitterService, event: Events) {
-  return async function fn<T>(fn: () => Promise<T>) {
+  return async function runWithEvent<T>(action: () => Promise<T>) {
     const promise = createEventPromise(eventEmitterService, event);
-    const result = await fn();
+    const result = await action();
     await promise;
     return result;
+  };
+}
+
+export function createAwaitWithEventWithResult<R = unknown>(
+  eventEmitterService: EventEmitterService,
+  event: Events
+) {
+  return async function runWithEventResult<T>(action: () => Promise<T>) {
+    const promise = createEventPromise(eventEmitterService, event);
+    await action();
+    await promise;
+    return (await promise) as R;
+  };
+}
+
+const createEventPromiseWithCount = (
+  eventEmitterService: EventEmitterService,
+  event: Events,
+  count: number = 1
+) => {
+  let theResolve: (value: unknown) => void;
+
+  const promise = new Promise((resolve) => {
+    theResolve = resolve;
+  });
+
+  const payloads: unknown[] = [];
+  eventEmitterService.eventEmitter.on(event, (payload) => {
+    payloads.push(payload);
+    if (payloads.length === count) {
+      theResolve(payloads);
+    }
+  });
+
+  return promise;
+};
+export function createAwaitWithEventWithResultWithCount(
+  eventEmitterService: EventEmitterService,
+  event: Events,
+  count: number = 1
+) {
+  return async function runWithEventResultCount<T>(action: () => Promise<T>) {
+    const promise = createEventPromiseWithCount(eventEmitterService, event, count);
+    const result = await action();
+    const payloads = await promise;
+    return {
+      result,
+      payloads,
+    };
   };
 }

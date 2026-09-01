@@ -32,7 +32,7 @@ import { omit } from 'lodash';
 import { LucideEye } from 'lucide-react';
 import { useTranslation } from 'next-i18next';
 import { QRCodeSVG } from 'qrcode.react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CopyButton } from '@/features/app/components/CopyButton';
 import { tableConfig } from '@/features/i18n/table.config';
 
@@ -45,7 +45,7 @@ const getShareUrl = ({
   theme?: string;
   hideToolBar?: boolean;
 }) => {
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://app.teable.io';
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://app.teable.ai';
   const url = new URL(`/share/${shareId}/view`, origin);
   if (theme && theme !== 'system') {
     url.searchParams.append('theme', theme);
@@ -77,12 +77,21 @@ export const SharePopover: React.FC<{
   const [hideToolBar, setHideToolBar] = useState<boolean>();
   const [embed, setEmbed] = useState<boolean>();
 
-  const { mutate: enableShareFn, isLoading: enableShareLoading } = useMutation({
+  // Optimistic toggle state: overrides view.enableShare until ShareDB syncs
+  const [optimisticEnabled, setOptimisticEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setOptimisticEnabled(null);
+  }, [view?.enableShare]);
+
+  const { mutate: enableShareFn, isPending: enableShareLoading } = useMutation({
     mutationFn: async (view: View) => view.apiEnableShare(),
+    onSuccess: () => setOptimisticEnabled(true),
   });
 
-  const { mutate: disableShareFn, isLoading: disableShareLoading } = useMutation({
+  const { mutate: disableShareFn, isPending: disableShareLoading } = useMutation({
     mutationFn: async (view: View) => view.disableShare(),
+    onSuccess: () => setOptimisticEnabled(false),
   });
 
   const shareUrl = useMemo(() => {
@@ -98,7 +107,8 @@ export const SharePopover: React.FC<{
     return children(ShareViewText, false);
   }
 
-  const { enableShare, shareMeta } = view;
+  const { shareMeta } = view;
+  const enableShare = optimisticEnabled ?? view.enableShare;
 
   const setShareMeta = (shareMeta: IShareViewMeta) => {
     view.setShareMeta({ ...view.shareMeta, ...shareMeta });
@@ -134,17 +144,19 @@ export const SharePopover: React.FC<{
   };
 
   const onSubmitRequireLoginChange = (check: boolean) => {
-    if (!shareMeta?.submit) {
-      return;
-    }
     setShareMeta({ submit: { ...shareMeta?.submit, requireLogin: check } });
   };
 
   const needConfigCopy = [ViewType.Grid].includes(view.type);
   const needConfigIncludeHiddenField = [ViewType.Grid].includes(view.type);
+  const needConfigAllowEdit = [
+    ViewType.Grid,
+    ViewType.Kanban,
+    ViewType.Gallery,
+    ViewType.Calendar,
+  ].includes(view.type);
+  const needConfigRequireLogin = [ViewType.Form].includes(view.type);
   const needEmbedHiddenToolbar = ![ViewType.Form].includes(view.type);
-  // TODO: need fixed createBy not support yet
-  const needSubmit = false;
 
   return (
     <Popover>
@@ -153,7 +165,7 @@ export const SharePopover: React.FC<{
         <div className="flex items-center justify-between">
           <Label htmlFor="share-switch">{t('table:toolbar.others.share.statusLabel')}</Label>
           <Switch
-            className="ml-auto"
+            className="ms-auto"
             id="share-switch"
             checked={enableShare}
             disabled={enableShareLoading || disableShareLoading || !permission['view|share']}
@@ -164,7 +176,7 @@ export const SharePopover: React.FC<{
         {enableShare ? (
           <>
             <div className="flex items-center gap-1">
-              <Input className="h-7 grow" id="share-link" value={shareUrl} readOnly />
+              <Input className="grow" size="sm" id="share-link" value={shareUrl} readOnly />
 
               <Popover>
                 <PopoverTrigger asChild>
@@ -180,8 +192,12 @@ export const SharePopover: React.FC<{
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button size={'xs'} variant={'outline'} onClick={() => view.setRefreshLink()}>
-                      <RefreshCcw />
+                    <Button
+                      size={'icon-xs'}
+                      variant={'outline'}
+                      onClick={() => view.setRefreshLink()}
+                    >
+                      <RefreshCcw className="size-4 shrink-0" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
@@ -216,6 +232,18 @@ export const SharePopover: React.FC<{
                   </Label>
                 </div>
               )}
+              {needConfigAllowEdit && (
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="share-allowEdit"
+                    checked={shareMeta?.allowEdit}
+                    onCheckedChange={(checked) => setShareMeta({ allowEdit: checked })}
+                  />
+                  <Label className="text-xs" htmlFor="share-allowEdit">
+                    {t('table:toolbar.others.share.allowEdit')}
+                  </Label>
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <Switch
                   id="share-password"
@@ -232,11 +260,11 @@ export const SharePopover: React.FC<{
                     size={'xs'}
                     onClick={() => setShowPasswordDialog(true)}
                   >
-                    <Edit />
+                    <Edit className="size-4 shrink-0" />
                   </Button>
                 )}
               </div>
-              {needSubmit && shareMeta?.submit && (
+              {needConfigRequireLogin && (
                 <div className="flex items-center gap-2">
                   <Switch
                     id="share-required-login"
@@ -321,19 +349,19 @@ export const SharePopover: React.FC<{
                 defaultValue={shareTheme}
                 onValueChange={(e) => setShareTheme(e)}
               >
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center space-x-2 rtl:space-x-reverse">
                   <RadioGroupItem value="system" id="r1" />
                   <Label className="text-xs font-normal" htmlFor="r1">
                     {t('common:settings.setting.system')}
                   </Label>
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center space-x-2 rtl:space-x-reverse">
                   <RadioGroupItem value="light" id="r2" />
                   <Label className="text-xs font-normal" htmlFor="r2">
                     {t('common:settings.setting.light')}
                   </Label>
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center space-x-2 rtl:space-x-reverse">
                   <RadioGroupItem value="dark" id="r3" />
                   <Label className="text-xs font-normal" htmlFor="r3">
                     {t('common:settings.setting.dark')}
@@ -360,7 +388,6 @@ export const SharePopover: React.FC<{
               <DialogDescription>{t('table:toolbar.others.share.passwordTips')}</DialogDescription>
             </DialogHeader>
             <Input
-              className="h-8"
               type="password"
               value={sharePassword}
               onChange={(e) => setSharePassword(e.target.value)}

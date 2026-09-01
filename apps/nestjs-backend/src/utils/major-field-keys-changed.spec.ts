@@ -67,7 +67,29 @@ describe('majorFieldKeysChanged', () => {
           formatting: {
             ...(formulaField.options as IFormulaFieldOptions).formatting,
             precision: 2,
-          },
+          } as INumberFormatting,
+        } as IFormulaFieldOptions,
+      })
+    ).toBe(false);
+  });
+
+  it('should return false if only defaultValue has changed', () => {
+    const singleSelectField = {
+      type: FieldType.SingleSelect,
+      name: 'Status',
+      dbFieldName: 'status',
+      options: {
+        choices: [{ id: 'cho1', name: 'Todo', color: 'blue' }],
+        defaultValue: 'Todo',
+      },
+    } as IFieldVo;
+
+    expect(
+      majorFieldKeysChanged(singleSelectField, {
+        ...singleSelectField,
+        options: {
+          ...singleSelectField.options,
+          defaultValue: undefined,
         },
       })
     ).toBe(false);

@@ -5,12 +5,13 @@ import { createContext } from 'react';
 import type { IKanbanPermission, IStackData } from '../type';
 
 export interface IKanbanContext {
-  recordQuery?: Pick<IGetRecordsRo, 'filter' | 'orderBy'>;
+  recordQuery?: Pick<IGetRecordsRo, 'filter' | 'orderBy' | 'projection' | 'ignoreViewQuery'>;
   stackField?: IFieldInstance;
   stackCollection?: IStackData[];
   coverField?: AttachmentField;
   isCoverFit?: boolean;
   isFieldNameHidden?: boolean;
+  isEmptyStackHidden?: boolean;
   permission: IKanbanPermission;
   primaryField: IFieldInstance;
   displayFields: IFieldInstance[];

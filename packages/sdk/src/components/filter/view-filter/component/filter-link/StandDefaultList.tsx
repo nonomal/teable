@@ -10,8 +10,7 @@ export const StandDefaultList = (props: IFilterLinkSelectListProps) => {
   const { t } = useTranslation();
   const baseId = useBaseId();
 
-  const isSingle = typeof value === 'string';
-  const values = isSingle ? [value] : value;
+  const values = typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
 
   return (
     <StandaloneViewProvider
@@ -20,12 +19,12 @@ export const StandDefaultList = (props: IFilterLinkSelectListProps) => {
       fallback={<h1>{t('common.empty')}</h1>}
     >
       <SocketRecordList
-        selectedRecordIds={values || undefined}
+        selectedRecordIds={values.length ? values : undefined}
         onClick={(value) => {
           onClick(value.id);
           StorageLinkSelected.set(`${field.options.foreignTableId}-${value.id}`, value.title);
         }}
-        primaryFieldId={field.options.lookupFieldId}
+        lookupFieldId={field.options.lookupFieldId}
       />
     </StandaloneViewProvider>
   );

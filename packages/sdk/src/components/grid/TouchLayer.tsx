@@ -14,6 +14,8 @@ import { useSelection, useVisibleRegion } from './hooks';
 import { LinearRowType, RegionType, SelectionRegionType } from './interface';
 import type {
   ICellItem,
+  ICellRegionWithData,
+  IInnerCell,
   ILinearRow,
   IMouseState,
   IRange,
@@ -22,6 +24,7 @@ import type {
 } from './interface';
 import type { CoordinateManager, ImageManager, SpriteManager } from './managers';
 import { emptySelection } from './managers';
+import { CellRegionType, getCellRenderer } from './renderers';
 import { RenderLayer } from './RenderLayer';
 import { getColumnStatisticData, inRange } from './utils';
 
@@ -71,15 +74,17 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
     coordInstance,
     scrollState,
     collaborators,
+    searchCursor,
     mouseState,
     rowControls,
+    rowControlPaddingX,
     imageManager,
     spriteManager,
     forceRenderFlag,
     rowIndexVisible,
     groupCollection,
     collapsedGroupIds,
-    columnHeaderVisible,
+    columnHeaderHeight,
     getCellContent,
     getLinearRow,
     real2RowIndex,
@@ -203,6 +208,45 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
       if (scrollTop + y > totalHeight && !inRange(y, containerHeight, height)) {
         return;
       }
+
+      let isPreview = false;
+
+      // Tap the cell
+      if (columnIndex >= 0) {
+        const cell = getCellContent([columnIndex, rowIndex]) as IInnerCell;
+        const cellRenderer = getCellRenderer(cell.type);
+        const onCellClick = cellRenderer.onClick;
+
+        if (onCellClick) {
+          const offsetX = coordInstance.getColumnOffset(columnIndex);
+          onCellClick(
+            cell as never,
+            {
+              width: coordInstance.getColumnWidth(columnIndex),
+              height: coordInstance.getRowHeight(rowIndex),
+              theme,
+              hoverCellPosition: [
+                columnIndex < coordInstance.freezeColumnCount
+                  ? x - offsetX
+                  : x - offsetX + scrollLeft,
+                y - coordInstance.getRowOffset(rowIndex) + scrollTop,
+              ],
+              activeCellBound: null,
+              isActive: false,
+            },
+            (cellRegion: ICellRegionWithData) => {
+              const { type } = cellRegion;
+
+              if (type === CellRegionType.Preview) {
+                isPreview = true;
+              }
+            }
+          );
+        }
+
+        if (isPreview) return;
+      }
+
       const range = [0, rowIndex];
       setActiveCell(range as IRange);
       setSelection(selection.set(SelectionRegionType.Cells, [range, range] as IRange[]));
@@ -221,8 +265,10 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
           columns={columns}
           columnStatistics={columnStatistics}
           collaborators={collaborators}
+          searchCursor={searchCursor}
           coordInstance={coordInstance}
           rowControls={rowControls}
+          rowControlPaddingX={rowControlPaddingX}
           imageManager={imageManager}
           spriteManager={spriteManager}
           visibleRegion={visibleRegion}
@@ -236,7 +282,7 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
           selection={emptySelection}
           isSelecting={false}
           forceRenderFlag={forceRenderFlag}
-          columnHeaderVisible={columnHeaderVisible}
+          columnHeaderHeight={columnHeaderHeight}
           columnFreezeState={DEFAULT_FREEZE_COLUMN_STATE}
           columnResizeState={DEFAULT_COLUMN_RESIZE_STATE}
           hoverCellPosition={null}

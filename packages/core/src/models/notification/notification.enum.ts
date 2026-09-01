@@ -3,9 +3,18 @@ export enum NotificationTypeEnum {
   CollaboratorCellTag = 'collaboratorCellTag',
   CollaboratorMultiRowTag = 'collaboratorMultiRowTag',
   Comment = 'comment',
+  ExportBase = 'exportBase',
+  AdminNotice = 'adminNotice',
+  CollaboratorInvite = 'collaboratorInvite',
 }
 
 export enum NotificationStatesEnum {
   Unread = 'unread',
   Read = 'read',
+}
+
+export enum NotificationSeverityEnum {
+  Critical = 'critical',
+  Warning = 'warning',
+  Info = 'info',
 }

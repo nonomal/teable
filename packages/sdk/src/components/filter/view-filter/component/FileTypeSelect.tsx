@@ -1,3 +1,4 @@
+import { useTranslation } from '../../../../context/app/i18n';
 import { BaseSingleSelect } from './base';
 
 interface IFileTypeSelectProps {
@@ -11,8 +12,17 @@ const typeOptions = [
 ];
 
 function FileTypeSelect(props: IFileTypeSelectProps) {
+  const { t } = useTranslation();
   const { value, onSelect } = props;
-  return <BaseSingleSelect value={value} onSelect={onSelect} options={typeOptions} />;
+  return (
+    <BaseSingleSelect
+      value={value}
+      onSelect={onSelect}
+      options={typeOptions}
+      drawerTitle={t('filter.selectValue')}
+      className="w-40"
+    />
+  );
 }
 
 export { FileTypeSelect };

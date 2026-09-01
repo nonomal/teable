@@ -12,7 +12,9 @@ on:
       - 'packages/core/**'
       - 'packages/sdk/**'
       - 'packages/openapi/**'
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,7 +22,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.9.0]
+        node-version: [22.22.3]
 
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +42,8 @@ jobs:
 
       - name: 🏗 Run build
         run: |
-          pnpm -F "./packages/**" run build
+          pnpm -F "./packages/**" -F "!@teable/v2-*" run build
 
       - name: 🧪 Run Tests
         run: |
-          pnpm -F "!@teable/backend" -r --parralel test-unit
+          pnpm -r -F "@teable/app" -F "@teable/core" -F "@teable/sdk" -F "@teable/openapi" --parallel test-unit

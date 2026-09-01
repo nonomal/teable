@@ -4,6 +4,9 @@ export interface IPresignParams {
   expiresIn?: number;
   hash?: string;
   internal?: boolean;
+  /** stored as object metadata when the client echoes it on PUT via
+   * requestHeaders; not signature-enforced */
+  cacheControl?: string;
 }
 
 export interface IPresignRes {
@@ -37,4 +40,21 @@ export type IRespHeaders = {
 export enum ThumbnailSize {
   SM = 'sm',
   LG = 'lg',
+}
+
+export interface IListObjectsOptions {
+  /** group keys after the delimiter into `prefixes`, like S3 common prefixes */
+  delimiter?: string;
+}
+
+export interface IListedObject {
+  key: string;
+  size: number;
+  /** content version when the backend provides one (S3/minio ETag; local mtime-size) */
+  etag?: string;
+}
+
+export interface IListObjectsResult {
+  objects: IListedObject[];
+  prefixes: string[];
 }

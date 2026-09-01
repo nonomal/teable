@@ -2,8 +2,8 @@ import type { OnModuleInit } from '@nestjs/common';
 import { Injectable, Logger } from '@nestjs/common';
 import { Reflector, DiscoveryService } from '@nestjs/core';
 import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper';
-import type { Job } from 'bullmq';
 import { localQueueEventEmitter } from './event-emitter';
+import type { ILocalJob } from './local-queue.provider';
 
 export const PROCESSOR_METADATA = 'bullmq:processor_metadata';
 
@@ -42,7 +42,8 @@ export class FallbackQueueService implements OnModuleInit {
         PROCESSOR_METADATA,
         instance.constructor || metatype
       );
-      localQueueEventEmitter.on('handle-listener', (job: Job<unknown>) => {
+      localQueueEventEmitter.removeAllListeners(`handle-listener-${queueName}`);
+      localQueueEventEmitter.on(`handle-listener-${queueName}`, (job: ILocalJob) => {
         if (job.queueName !== queueName) {
           return;
         }
@@ -51,10 +52,10 @@ export class FallbackQueueService implements OnModuleInit {
     });
   }
 
-  private handleListener(
+  private async handleListener(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapper: InstanceWrapper,
-    job: Job<unknown>
+    job: ILocalJob
   ) {
     const { instance } = wrapper;
     const methodName = 'process';
@@ -62,6 +63,15 @@ export class FallbackQueueService implements OnModuleInit {
       this.logger.warn(`${instance.constructor.name} has no method ${methodName}`);
       return;
     }
-    instance[methodName].call(instance, job);
+    try {
+      job.state = 'active';
+      const result = await instance[methodName].call(instance, job);
+      job.state = 'completed';
+      job.returnvalue = result;
+    } catch (error) {
+      job.state = 'failed';
+      job.failedReason = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error processing job ${job.name}:`, error);
+    }
   }
 }

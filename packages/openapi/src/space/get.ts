@@ -3,13 +3,22 @@ import { roleSchema } from '@teable/core';
 import { axios } from '../axios';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
+import { dataDbConnectionSummaryVoSchema } from './data-db';
 
 export const GET_SPACE = '/space/{spaceId}';
 
 export const getSpaceVoSchema = z.object({
   id: z.string(),
   name: z.string(),
+  avatar: z.string().nullable().optional(),
   role: roleSchema,
+  organization: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+    })
+    .optional(),
+  dataDb: dataDbConnectionSummaryVoSchema.optional(),
 });
 
 export type IGetSpaceVo = z.infer<typeof getSpaceVoSchema>;

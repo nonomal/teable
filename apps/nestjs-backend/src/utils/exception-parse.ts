@@ -8,7 +8,13 @@ export const exceptionParse = (
   if (exception instanceof HttpError) {
     return new CustomHttpException(exception.message, exception.code);
   }
-  if (exception instanceof CustomHttpException) {
+
+  if (
+    exception &&
+    typeof exception === 'object' &&
+    'code' in exception &&
+    'getStatus' in exception
+  ) {
     return exception;
   }
 
@@ -19,7 +25,7 @@ export const exceptionParse = (
 
   return new CustomHttpException(
     process.env.NODE_ENV === 'test'
-      ? `Internal Server Error: ${exception.message}`
+      ? `Internal Server Error: ${exception.message}, ${exception.stack}`
       : 'Internal Server Error',
     HttpErrorCode.INTERNAL_SERVER_ERROR
   );

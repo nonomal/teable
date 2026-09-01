@@ -1,5 +1,24 @@
+import type { IGridColumnMeta } from '@teable/core';
 import { CellValueType, StatisticsFunc } from '@teable/core';
 import type { IFieldInstance } from '../model';
+
+// Group a view's column statistic funcs into the aggregation query's field-map
+// shape ({ [func]: fieldIds }). When visibleFieldIds is given, hidden columns
+// are dropped: share views must not request aggregates for fields the visitor
+// cannot see, and personal views project only their visible fields.
+export const buildStatisticFieldMap = (
+  columnMeta: IGridColumnMeta | undefined,
+  visibleFieldIds?: string[]
+): Record<StatisticsFunc, string[]> => {
+  const fieldMap = {} as Record<StatisticsFunc, string[]>;
+  if (!columnMeta) return fieldMap;
+  const visibleSet = visibleFieldIds ? new Set(visibleFieldIds) : undefined;
+  for (const [fieldId, { statisticFunc }] of Object.entries(columnMeta)) {
+    if (!statisticFunc || (visibleSet && !visibleSet.has(fieldId))) continue;
+    (fieldMap[statisticFunc] ??= []).push(fieldId);
+  }
+  return fieldMap;
+};
 
 export const percentFormatting = (value: number) => {
   if (value % 1 === 0) {
@@ -12,6 +31,21 @@ export const percentFormatting = (value: number) => {
 export const bytesToMB = (bytes: number) => {
   const mb = bytes / 1048576;
   return (mb <= 1 ? 0 : mb.toFixed(2)).toString();
+};
+
+export const formatAttachmentSize = (bytes: number): string => {
+  if (bytes <= 0) return '0 B';
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  let value = bytes / 1024 ** unitIndex;
+
+  if (Number(value.toFixed(2)) >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${Number(value.toFixed(2))} ${units[unitIndex]}`;
 };
 
 export const statisticsValue2DisplayValue = (
@@ -39,7 +73,7 @@ export const statisticsValue2DisplayValue = (
     case StatisticsFunc.LatestDate:
     case StatisticsFunc.EarliestDate: {
       if ([CellValueType.Number, CellValueType.DateTime].includes(cellValueType)) {
-        return field.cellValue2String(defaultToZero(value, statFunc));
+        return field.item2String(defaultToZero(value, statFunc));
       }
       return String(value);
     }
@@ -51,7 +85,7 @@ export const statisticsValue2DisplayValue = (
       return `${percentFormatting(value as number)}%`;
     }
     case StatisticsFunc.TotalAttachmentSize: {
-      return `${bytesToMB(value as number)}MB`;
+      return formatAttachmentSize(Number(value));
     }
   }
 };

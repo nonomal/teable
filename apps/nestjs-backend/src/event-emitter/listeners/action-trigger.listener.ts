@@ -6,18 +6,50 @@ import { isEmpty } from 'lodash';
 import { match } from 'ts-pattern';
 import { ShareDbService } from '../../share-db/share-db.service';
 import type {
+  IChangeRecord,
   RecordCreateEvent,
   RecordDeleteEvent,
   RecordUpdateEvent,
   ViewUpdateEvent,
   FieldUpdateEvent,
   FieldCreateEvent,
+  FieldDeleteEvent,
 } from '../events';
 import { Events } from '../events';
 
+const collectChangedRecordFieldIds = (record: IChangeRecord | IChangeRecord[]): string[] => {
+  const records = Array.isArray(record) ? record : [record];
+  const fieldIds = new Set<string>();
+  for (const changeRecord of records) {
+    for (const fieldId of Object.keys(changeRecord?.fields ?? {})) {
+      fieldIds.add(fieldId);
+    }
+  }
+  return [...fieldIds];
+};
+
+const schemaRefreshFieldProperties = new Set(['type', 'options', 'dbFieldType']);
+
+const hasSchemaRefreshFieldChange = (field: FieldUpdateEvent['payload']['field']): boolean => {
+  const fields = Array.isArray(field) ? field : [field];
+  return fields.some((changeField) =>
+    Object.keys(changeField).some((key) => schemaRefreshFieldProperties.has(key))
+  );
+};
+
 type IViewEvent = ViewUpdateEvent;
 type IRecordEvent = RecordCreateEvent | RecordDeleteEvent | RecordUpdateEvent;
-type IListenerEvent = IViewEvent | IRecordEvent | FieldUpdateEvent | FieldCreateEvent;
+type IListenerEvent =
+  | IViewEvent
+  | IRecordEvent
+  | FieldUpdateEvent
+  | FieldCreateEvent
+  | FieldDeleteEvent;
+
+export interface IActionTriggerData {
+  actionKey: ITableActionKey | IViewActionKey;
+  payload?: Record<string, unknown>;
+}
 
 @Injectable()
 export class ActionTriggerListener {
@@ -28,6 +60,7 @@ export class ActionTriggerListener {
   @OnEvent(Events.TABLE_VIEW_UPDATE, { async: true })
   @OnEvent(Events.TABLE_FIELD_UPDATE, { async: true })
   @OnEvent(Events.TABLE_FIELD_CREATE, { async: true })
+  @OnEvent(Events.TABLE_FIELD_DELETE, { async: true })
   @OnEvent('table.record.*', { async: true })
   private async listener(listenerEvent: IListenerEvent): Promise<void> {
     // Handling table view update events
@@ -43,6 +76,11 @@ export class ActionTriggerListener {
     // Handling table field create events
     if (this.isTableFieldCreateEvent(listenerEvent)) {
       await this.handleTableFieldCreate(listenerEvent as FieldCreateEvent);
+    }
+
+    // Handling table field delete events
+    if (this.isTableFieldDeleteEvent(listenerEvent)) {
+      await this.handleTableFieldDelete(listenerEvent as FieldDeleteEvent);
     }
 
     // Handling table record events (create, delete, update)
@@ -81,7 +119,10 @@ export class ActionTriggerListener {
     }
 
     if (!isEmpty(buffer)) {
-      this.emitActionTrigger(viewId, buffer);
+      this.emitActionTrigger(
+        viewId,
+        buffer.map((actionKey) => ({ actionKey }))
+      );
     }
   }
 
@@ -91,22 +132,34 @@ export class ActionTriggerListener {
     }
 
     const { tableId } = event.payload;
-    return this.emitActionTrigger(tableId, ['setField']);
+    return this.emitActionTrigger(tableId, [{ actionKey: 'setField', payload: event.payload }]);
   }
 
   private async handleTableFieldCreate(event: FieldCreateEvent): Promise<void> {
     const { tableId } = event.payload;
-    return this.emitActionTrigger(tableId, ['addField']);
+    return this.emitActionTrigger(tableId, [{ actionKey: 'addField', payload: event.payload }]);
+  }
+
+  private async handleTableFieldDelete(event: FieldDeleteEvent): Promise<void> {
+    const { tableId } = event.payload;
+    return this.emitActionTrigger(tableId, [{ actionKey: 'deleteField', payload: event.payload }]);
   }
 
   private async handleTableRecordEvent(event: IRecordEvent): Promise<void> {
     const { tableId } = event.payload;
 
     const buffer = match(event)
-      .returnType<ITableActionKey[]>()
-      .with({ name: Events.TABLE_RECORD_CREATE }, () => ['addRecord'])
-      .with({ name: Events.TABLE_RECORD_UPDATE }, () => ['setRecord'])
-      .with({ name: Events.TABLE_RECORD_DELETE }, () => ['deleteRecord'])
+      .returnType<IActionTriggerData[]>()
+      .with({ name: Events.TABLE_RECORD_CREATE }, () => [{ actionKey: 'addRecord' as const }])
+      .with({ name: Events.TABLE_RECORD_UPDATE }, (updateEvent) => [
+        {
+          actionKey: 'setRecord' as const,
+          // changed cell field ids, letting field-aware listeners skip
+          // refreshes for irrelevant edits (same contract as the v2 emitter)
+          payload: { fieldIds: collectChangedRecordFieldIds(updateEvent.payload.record) },
+        },
+      ])
+      .with({ name: Events.TABLE_RECORD_DELETE }, () => [{ actionKey: 'deleteRecord' as const }])
       .otherwise(() => []);
 
     if (!isEmpty(buffer)) {
@@ -126,6 +179,10 @@ export class ActionTriggerListener {
     return Events.TABLE_FIELD_CREATE === event.name;
   }
 
+  private isTableFieldDeleteEvent(event: IListenerEvent): boolean {
+    return Events.TABLE_FIELD_DELETE === event.name;
+  }
+
   private isValidViewUpdateOperation(event: ViewUpdateEvent): boolean | undefined {
     const propertyKeys = ['filter', 'group'];
     const { name, propertyKey } = event.context.opMeta || {};
@@ -133,9 +190,11 @@ export class ActionTriggerListener {
   }
 
   private isValidFieldUpdateOperation(event: FieldUpdateEvent): boolean | undefined {
-    const propertyKeys = ['options'];
     const { propertyKey } = event.context.opMeta || {};
-    return propertyKeys.includes(propertyKey as string);
+    return (
+      schemaRefreshFieldProperties.has(propertyKey as string) ||
+      hasSchemaRefreshFieldChange(event.payload.field)
+    );
   }
 
   private isTableRecordEvent(event: IListenerEvent): boolean {
@@ -147,7 +206,7 @@ export class ActionTriggerListener {
     return recordEvents.includes(event.name);
   }
 
-  private emitActionTrigger(tableIdOrViewId: string, data: ITableActionKey[] | IViewActionKey[]) {
+  private emitActionTrigger(tableIdOrViewId: string, data: IActionTriggerData[]) {
     const channel = getActionTriggerChannel(tableIdOrViewId);
 
     const presence = this.shareDbService.connect().getPresence(channel);

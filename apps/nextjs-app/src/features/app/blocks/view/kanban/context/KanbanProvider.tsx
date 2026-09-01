@@ -1,11 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import type { IUserCellValue } from '@teable/core';
 import { FieldType } from '@teable/core';
-import type { ListBaseCollaboratorRo } from '@teable/openapi';
+import type { IShareViewCollaboratorsRo, UserCollaboratorItem } from '@teable/openapi';
 import {
   getBaseCollaboratorList,
   getShareViewCollaborators,
   GroupPointType,
+  PrincipalType,
 } from '@teable/openapi';
 import { ExpandRecorder } from '@teable/sdk/components';
 import { ReactQueryKeys } from '@teable/sdk/config';
@@ -15,13 +16,18 @@ import {
   useFields,
   useTableId,
   useGroupPoint,
+  useCommentPermission,
   useTablePermission,
   useFieldPermission,
   useBaseId,
+  useIsReadOnlyPreview,
+  useButtonClickStatus,
+  useDeepCompareMemoize,
 } from '@teable/sdk/hooks';
 import type { KanbanView, IFieldInstance, AttachmentField } from '@teable/sdk/model';
+import { useRouter } from 'next/router';
 import type { ReactNode } from 'react';
-import { useContext, useMemo, useState } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import { UNCATEGORIZED_STACK_ID } from '../constant';
 import { KanbanContext } from './KanbanContext';
 
@@ -38,22 +44,60 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
   const { shareId } = useContext(ShareViewContext) ?? {};
   const { sort, filter } = view ?? {};
   const permission = useTablePermission();
+  const { commentReadable, commentWritable } = useCommentPermission();
   const fields = useFields();
+  const readableFields = useFields({ withHidden: true });
   const allFields = useFields({ withHidden: true, withDenied: true });
+  const visibleFieldIds = useDeepCompareMemoize(fields.map(({ id }) => id).sort()) as string[];
   const { stackFieldId, coverFieldId, isCoverFit, isFieldNameHidden, isEmptyStackHidden } =
     view?.options ?? {};
-  const fieldPermission = useFieldPermission(stackFieldId);
+  const fieldPermission = useFieldPermission();
   const [expandRecordId, setExpandRecordId] = useState<string>();
+  const buttonClickStatusHook = useButtonClickStatus(tableId!, shareId);
   const groupPoints = useGroupPoint();
+  const router = useRouter();
+  const {
+    recordId: routerRecordId,
+    showHistory: routerShowHistory,
+    showComment: routerShowComment,
+  } = router.query;
+  const showHistory = routerShowHistory === 'true';
+  const showComment = { true: true, false: false }[routerShowComment as string];
+
+  useEffect(() => {
+    setExpandRecordId(routerRecordId as string);
+  }, [routerRecordId, setExpandRecordId]);
+
+  const coverField = useMemo(() => {
+    if (!coverFieldId) return;
+    return readableFields.find(
+      ({ id, type }) => id === coverFieldId && type === FieldType.Attachment
+    ) as AttachmentField | undefined;
+  }, [coverFieldId, readableFields]);
+
+  const projectionFieldIds = useMemo(() => {
+    // projection is a field-id set, not a sequence: keep it order-stable so
+    // downstream cache keys don't churn when fields are reordered
+    const ids = coverField ? new Set([...visibleFieldIds, coverField.id]) : visibleFieldIds;
+    return [...ids].sort();
+  }, [coverField, visibleFieldIds]);
 
   const recordQuery = useMemo(() => {
-    if (!shareId || (!sort && !filter)) return;
-
-    return {
+    // same contract as useRecords: search must only hit the fields this view
+    // displays, so every record query in the kanban view declares it explicitly
+    const baseQuery = {
       orderBy: sort?.sortObjs,
       filter: filter,
+      projection: projectionFieldIds,
     };
-  }, [shareId, sort, filter]);
+
+    if (shareId) return baseQuery;
+
+    return {
+      ...baseQuery,
+      ignoreViewQuery: true,
+    };
+  }, [shareId, sort, filter, projectionFieldIds]);
 
   const stackField = useMemo(() => {
     if (!stackFieldId) return;
@@ -61,19 +105,39 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
   }, [stackFieldId, allFields]);
 
   const { type, isMultipleCellValue } = stackField ?? {};
-
-  const { data: userList } = useQuery({
-    queryKey: shareId
-      ? ReactQueryKeys.shareViewCollaborators(shareId)
-      : ReactQueryKeys.baseCollaboratorList(baseId, { includeSystem: true }),
+  const isReadOnlyPreview = useIsReadOnlyPreview();
+  const { data: shareViewCollaborators } = useQuery({
+    queryKey: ReactQueryKeys.shareViewCollaborators(shareId, {
+      type: PrincipalType.User,
+      skip: 0,
+      take: 5000,
+    }),
     queryFn: ({ queryKey }) =>
-      shareId
-        ? getShareViewCollaborators(queryKey[1], {}).then((data) => data.data)
-        : getBaseCollaboratorList(queryKey[1], queryKey[2] as ListBaseCollaboratorRo).then(
-            (data) => data.data
-          ),
-    enabled: Boolean((shareId || baseId) && type === FieldType.User && !isMultipleCellValue),
+      getShareViewCollaborators(queryKey[1], queryKey[2] as IShareViewCollaboratorsRo).then(
+        (data) => data.data
+      ),
+    enabled: Boolean(shareId && type === FieldType.User && !isMultipleCellValue),
   });
+
+  const { data: baseCollaborators } = useQuery({
+    queryKey: ReactQueryKeys.baseCollaboratorList(baseId, {
+      includeSystem: true,
+      skip: 0,
+      take: 5000,
+      type: PrincipalType.User,
+    }),
+    queryFn: ({ queryKey }) =>
+      getBaseCollaboratorList(queryKey[1], queryKey[2]).then((data) => data.data),
+    enabled:
+      !shareId &&
+      Boolean(baseId && type === FieldType.User && !isMultipleCellValue && !isReadOnlyPreview),
+  });
+
+  const userList = shareId
+    ? shareViewCollaborators
+    : (baseCollaborators?.collaborators as UserCollaboratorItem[]);
+
+  const stackFieldRecordEditable = stackField?.canReadFieldRecord;
 
   const kanbanPermission = useMemo(() => {
     return {
@@ -84,9 +148,13 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
       cardCreatable: Boolean(permission['record|create']),
       cardEditable: Boolean(permission['record|update']),
       cardDeletable: Boolean(permission['record|delete']),
-      cardDraggable: Boolean(permission['record|update'] && permission['view|update']),
+      cardDraggable: Boolean(
+        permission['record|update'] && permission['view|update'] && stackFieldRecordEditable
+      ),
+      cardCommentReadable: commentReadable,
+      cardCommentCreatable: commentWritable,
     };
-  }, [permission, fieldPermission]);
+  }, [permission, fieldPermission, stackFieldRecordEditable, commentReadable, commentWritable]);
 
   const stackCollection = useMemo(() => {
     if (groupPoints == null || stackField == null) return;
@@ -95,6 +163,10 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
     const isDisabledStackField = type === FieldType.Attachment;
 
     if (isDisabledStackField) return;
+
+    if (!stackFieldRecordEditable) {
+      return [UNCATEGORIZED_STACK_DATA];
+    }
 
     const stackList: { id: string; count: number; data: unknown }[] = [];
     const stackMap: Record<string, { id: string; count: number; data: unknown }> = {};
@@ -136,6 +208,10 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
           }
       );
       stackList.unshift(UNCATEGORIZED_STACK_DATA);
+      if (isEmptyStackHidden) {
+        return stackList.filter(({ count }) => count > 0);
+      }
+
       return stackList;
     }
 
@@ -154,24 +230,20 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
           }
       );
       stackList.unshift(UNCATEGORIZED_STACK_DATA);
+      if (isEmptyStackHidden) {
+        return stackList.filter(({ count }) => count > 0);
+      }
+
       return stackList;
     }
 
     stackList.unshift(UNCATEGORIZED_STACK_DATA);
-
     if (isEmptyStackHidden) {
       return stackList.filter(({ count }) => count > 0);
     }
 
     return stackList;
-  }, [groupPoints, isEmptyStackHidden, stackField, userList]);
-
-  const coverField = useMemo(() => {
-    if (!coverFieldId) return;
-    return allFields.find(
-      ({ id, type }) => id === coverFieldId && type === FieldType.Attachment
-    ) as AttachmentField | undefined;
-  }, [coverFieldId, allFields]);
+  }, [groupPoints, isEmptyStackHidden, stackField, userList, stackFieldRecordEditable]);
 
   const { primaryField, displayFields } = useMemo(() => {
     let primaryField: IFieldInstance | null = null;
@@ -194,6 +266,7 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
       recordQuery,
       isCoverFit,
       isFieldNameHidden,
+      isEmptyStackHidden,
       permission: kanbanPermission,
       stackField,
       coverField,
@@ -206,6 +279,7 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
     recordQuery,
     isCoverFit,
     isFieldNameHidden,
+    isEmptyStackHidden,
     kanbanPermission,
     stackField,
     coverField,
@@ -215,15 +289,39 @@ export const KanbanProvider = ({ children }: { children: ReactNode }) => {
     setExpandRecordId,
   ]);
 
+  const onClose = () => {
+    setExpandRecordId(undefined);
+    const {
+      recordId: _recordId,
+      showHistory: _showHistory,
+      showComment: _showComment,
+      ...resetQuery
+    } = router.query;
+    router.push(
+      {
+        pathname: router.pathname,
+        query: resetQuery,
+      },
+      undefined,
+      {
+        shallow: true,
+      }
+    );
+  };
+
   return (
     <KanbanContext.Provider value={value}>
       {children}
       {tableId && (
         <ExpandRecorder
           tableId={tableId}
+          viewId={view?.id}
           recordId={expandRecordId}
           recordIds={expandRecordId ? [expandRecordId] : []}
-          onClose={() => setExpandRecordId(undefined)}
+          onClose={onClose}
+          buttonClickStatusHook={buttonClickStatusHook}
+          showHistory={showHistory}
+          showComment={showComment}
         />
       )}
     </KanbanContext.Provider>

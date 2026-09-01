@@ -86,7 +86,7 @@ export const QuerySelect = (props: IQueryEditorProps<IBaseQuerySelect[]>) => {
                   {v.alias ?? columns?.find((c) => c.column === v.column)?.name}
                   <Button
                     variant="link"
-                    className="h-auto pr-0 text-[13px]"
+                    className="h-auto pe-0 text-[13px]"
                     size={'xs'}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -94,7 +94,7 @@ export const QuerySelect = (props: IQueryEditorProps<IBaseQuerySelect[]>) => {
                       onChange?.(newV?.length ? newV : undefined);
                     }}
                   >
-                    <X />
+                    <X className="size-4 shrink-0" />
                   </Button>
                 </Badge>
               )) || t('common.selectPlaceHolder')}

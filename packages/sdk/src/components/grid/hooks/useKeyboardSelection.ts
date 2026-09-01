@@ -29,23 +29,13 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
     setSelection,
     onUndo,
     onRedo,
-    onCopy,
     onDelete,
     onRowExpand,
     editorRef,
+    scrollBy,
+    disableEnterMoveDown,
   } = props;
   const { pureRowCount, columnCount } = coordInstance;
-
-  useHotkeys(
-    'mod+c',
-    () => {
-      onCopy?.(selection);
-    },
-    {
-      enabled: !isEditing && selection.type !== SelectionRegionType.None,
-      enableOnFormTags: ['input', 'select', 'textarea'],
-    }
-  );
 
   useHotkeys(
     'mod+z',
@@ -132,10 +122,14 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
   );
 
   useHotkeys(
-    'tab',
+    ['tab', 'shift+tab'],
     () => {
       const [columnIndex, rowIndex] = selection.ranges[0];
-      const newColumnIndex = Math.min(columnIndex + 1, columnCount - 1);
+
+      let newColumnIndex = Math.min(columnIndex + 1, columnCount - 1);
+      if (isHotkeyPressed('shift') && isHotkeyPressed('tab'))
+        newColumnIndex = Math.max(columnIndex - 1, 0);
+
       const newRange = <IRange>[newColumnIndex, rowIndex];
       const ranges = [newRange, newRange];
 
@@ -152,6 +146,17 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
   );
 
   useHotkeys(
+    ['PageUp', 'PageDown'],
+    () => {
+      const delta = coordInstance.containerHeight - coordInstance.rowInitSize - 1;
+      scrollBy(0, isHotkeyPressed('PageUp') ? -delta : delta);
+    },
+    {
+      enabled: Boolean(activeCell && !isEditing),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
+  useHotkeys(
     'mod+a',
     () => {
       const ranges = [
@@ -167,12 +172,12 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
   );
 
   useHotkeys(
-    ['del', 'backspace', 'f2'],
+    ['delete', 'backspace', 'f2'],
     () => {
       if (isHotkeyPressed('f2')) {
         return setEditing(true);
       }
-      if (isHotkeyPressed('backspace') || isHotkeyPressed('del')) {
+      if (isHotkeyPressed('backspace') || isHotkeyPressed('delete')) {
         return onDelete?.(selection);
       }
     },
@@ -184,7 +189,9 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
 
   useHotkeys(
     ['enter'],
-    () => {
+    (keyboardEvent) => {
+      if (keyboardEvent.isComposing) return;
+
       const { isColumnSelection, ranges: selectionRanges } = selection;
       if (isEditing) {
         let range = selectionRanges[0];
@@ -192,7 +199,10 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
           range = [range[0], 0];
         }
         const [columnIndex, rowIndex] = range;
-        const nextRowIndex = Math.min(rowIndex + 1, pureRowCount - 1);
+        // Stay on the edited cell so the caller can follow a record that re-positions on edit.
+        const nextRowIndex = disableEnterMoveDown
+          ? rowIndex
+          : Math.min(rowIndex + 1, pureRowCount - 1);
         const newRange = [columnIndex, nextRowIndex] as IRange;
         editorRef.current?.saveValue?.();
         setTimeout(() => {

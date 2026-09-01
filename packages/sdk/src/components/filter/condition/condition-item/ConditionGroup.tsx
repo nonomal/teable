@@ -1,6 +1,8 @@
-import { Plus, Trash2 } from '@teable/icons';
+import type { IConjunction } from '@teable/core';
+import { Plus, Trash, ListPlus } from '@teable/icons';
 import {
   Button,
+  cn,
   DropdownMenu,
   Tooltip,
   TooltipTrigger,
@@ -10,42 +12,73 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@teable/ui-lib';
+import React from 'react';
 import { useTranslation } from '../../../../context/app/i18n';
+import { useInDrawer } from '../../../adaptive-panel';
 import { useCrud, useDepth } from '../../hooks';
 import type {
   IComponentWithChildren,
   IBaseFilterComponentProps,
   IBaseConditionProps,
 } from '../../types';
+import { ConjunctionSelect } from '../ConjunctionSelect';
 
 interface IConditionGroupProps
   extends IComponentWithChildren,
     Pick<IBaseFilterComponentProps, 'path'>,
-    IBaseConditionProps {}
+    IBaseConditionProps {
+  conjunction: IConjunction;
+}
 
 export const ConditionGroup = (props: IConditionGroupProps) => {
-  const { children, path, index, depth } = props;
+  const { children, path, index, depth, conjunction } = props;
   const maxDepth = useDepth();
-  const { onDelete, createCondition } = useCrud();
+  const { onDelete, createCondition, onChange } = useCrud();
   const { t } = useTranslation();
+  const inDrawer = useInDrawer();
+
+  const onChangeConjunctionHandler = (val: IConjunction | null) => {
+    if (val) {
+      onChange([...path, 'conjunction'], val);
+    }
+  };
 
   return (
-    <div className="flex flex-1 flex-col rounded-sm border border-input px-2 py-1">
-      <div className="flex items-center">
-        <span className="flex-1 truncate text-xs">{t('filter.groupDescription')}</span>
-        <div className="flex gap-1">
-          <DropdownMenu modal={false}>
+    <div
+      className={cn(
+        'flex flex-1 flex-col rounded-lg border border-input px-3 py-2 gap-1.5',
+        // Each nesting level eats horizontal room; `min-w-0` keeps the card
+        // shrinkable and the tighter padding buys back 8px per level.
+        inDrawer && 'min-w-0 px-2',
+        depth === 1 && 'bg-muted dark:bg-white/5',
+        depth === 2 && 'bg-card dark:bg-white/5'
+      )}
+    >
+      <div className={cn('flex items-center', inDrawer && 'min-w-0 gap-1')}>
+        <ConjunctionSelect
+          value={conjunction}
+          onSelect={onChangeConjunctionHandler}
+          // Row container: shrinking here is horizontal, which is what keeps
+          // the add/delete buttons on screen when the label is long.
+          className={cn(inDrawer && 'min-w-0 shrink')}
+        />
+        <div className={cn('ms-auto flex', inDrawer && 'shrink-0')}>
+          {/* Must match the surrounding layer: a non-modal menu inside a
+              modal drawer dismisses the wrong DismissableLayer. */}
+          <DropdownMenu modal={inDrawer}>
             <DropdownMenuTrigger>
-              <Button size="xs" variant="ghost" className="size-7">
-                <Plus />
+              <Button variant="ghost" size="icon-sm" className="text-muted-foreground">
+                <Plus className="size-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent>
+            <DropdownMenuContent align="start">
               <DropdownMenuItem
+                className="cursor-pointer"
                 onClick={() => {
                   createCondition([...path, 'children'], 'item');
                 }}
               >
+                <Plus className="me-2 size-4" />
                 {t('filter.addCondition')}
               </DropdownMenuItem>
               <TooltipProvider>
@@ -53,11 +86,13 @@ export const ConditionGroup = (props: IConditionGroupProps) => {
                   <TooltipTrigger asChild>
                     <div>
                       <DropdownMenuItem
+                        className="cursor-pointer"
                         disabled={depth + 1 > maxDepth}
                         onClick={() => {
                           createCondition([...path, 'children'], 'group');
                         }}
                       >
+                        <ListPlus className="me-2 size-4" />
                         {t('filter.addConditionGroup')}
                       </DropdownMenuItem>
                     </div>
@@ -73,17 +108,20 @@ export const ConditionGroup = (props: IConditionGroupProps) => {
           </DropdownMenu>
 
           <Button
-            size="xs"
             variant="ghost"
+            size={'icon'}
+            className="size-8 text-muted-foreground"
             onClick={() => {
               onDelete(path, index);
             }}
           >
-            <Trash2 />
+            <Trash className="size-4" />
           </Button>
         </div>
       </div>
-      <div className="flex flex-col">{children}</div>
+      {React.Children.count(children) > 0 && (
+        <div className={cn('mb-1 flex flex-col gap-2', inDrawer && 'gap-4')}>{children}</div>
+      )}
     </div>
   );
 };
